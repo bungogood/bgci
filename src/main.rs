@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::fs;
 use std::io::{BufRead, BufReader, BufWriter, Write};
 use std::path::Path;
@@ -16,6 +17,9 @@ const DUEL_CONFIG_PATH: &str = "config/duel.toml";
 #[derive(Debug, Parser)]
 #[command(name = "bgci", about = "UBGI dueller")]
 struct CliArgs {
+    #[arg(long, default_value = DUEL_CONFIG_PATH)]
+    config: String,
+
     #[arg(long)]
     games: Option<usize>,
 }
@@ -29,6 +33,7 @@ struct DuelConfig {
     swap_sides: bool,
     variant: String,
     output_csv: String,
+    trace_games_dir: Option<String>,
     engine_a: EngineConfig,
     engine_b: EngineConfig,
 }
@@ -42,6 +47,7 @@ impl Default for DuelConfig {
             swap_sides: true,
             variant: "backgammon".to_string(),
             output_csv: "artifacts/duels/latest/results.csv".to_string(),
+            trace_games_dir: None,
             engine_a: EngineConfig::default_a(),
             engine_b: EngineConfig::default_b(),
         }
@@ -52,6 +58,8 @@ impl Default for DuelConfig {
 struct EngineConfig {
     name: String,
     command: Vec<String>,
+    #[serde(default)]
+    env: BTreeMap<String, String>,
 }
 
 impl EngineConfig {
@@ -65,6 +73,7 @@ impl EngineConfig {
                 "--bin".to_string(),
                 "random_engine".to_string(),
             ],
+            env: BTreeMap::new(),
         }
     }
 
@@ -78,6 +87,7 @@ impl EngineConfig {
                 "--bin".to_string(),
                 "random_engine".to_string(),
             ],
+            env: BTreeMap::new(),
         }
     }
 }
@@ -97,6 +107,7 @@ struct DuelGameResult {
     b_decisions: usize,
     a_decision_sec: f64,
     b_decision_sec: f64,
+    trace_lines: Vec<String>,
 }
 
 impl EngineProcess {
@@ -107,6 +118,16 @@ impl EngineProcess {
         let mut cmd = Command::new(&config.command[0]);
         if config.command.len() > 1 {
             cmd.args(&config.command[1..]);
+        }
+        for (key, value) in &config.env {
+            if key.ends_with("_TRACE_LOG") || key.ends_with("_DEBUG_LOG") {
+                let p = Path::new(value);
+                if let Some(parent) = p.parent() {
+                    let _ = fs::create_dir_all(parent);
+                }
+                let _ = fs::write(p, "");
+            }
+            cmd.env(key, value);
         }
         let mut child = cmd
             .stdin(Stdio::piped())
@@ -193,12 +214,18 @@ impl EngineProcess {
         Ok(())
     }
 
-    fn choose_move_id(&mut self, position_id: &str, dice: Dice) -> Result<String, String> {
+    fn choose_move_id(
+        &mut self,
+        position_id: &str,
+        dice: Dice,
+        x_to_move: bool,
+    ) -> Result<String, String> {
         let (d1, d2) = match dice {
             Dice::Double(d) => (d, d),
             Dice::Mixed(m) => (m.big(), m.small()),
         };
         self.send(&format!("position gnubgid {position_id}"))?;
+        self.send(&format!("setturn {}", if x_to_move { "p0" } else { "p1" }))?;
         self.send(&format!("dice {d1} {d2}"))?;
         self.send("go role chequer")?;
         loop {
@@ -207,9 +234,16 @@ impl EngineProcess {
                 return Ok(id.trim().to_string());
             }
             if let Some(payload) = line.strip_prefix("bestmove ") {
-                return Ok(payload.trim().to_string());
+                let payload = payload.trim();
+                if !payload.is_empty() && !payload.chars().any(char::is_whitespace) {
+                    return Ok(payload.to_string());
+                }
+                continue;
             }
             if line.starts_with("error ") {
+                if line.starts_with("error unknown_command") {
+                    continue;
+                }
                 return Err(format!("engine error: {line}"));
             }
         }
@@ -222,7 +256,7 @@ impl EngineProcess {
 
 fn main() -> Result<(), String> {
     let args = CliArgs::parse();
-    let mut cfg: DuelConfig = load_toml(DUEL_CONFIG_PATH)?;
+    let mut cfg: DuelConfig = load_toml(&args.config)?;
     if let Some(games) = args.games {
         cfg.games = games;
     }
@@ -241,6 +275,14 @@ fn main() -> Result<(), String> {
     .map_err(|e| e.to_string())?;
     csv.flush().map_err(|e| e.to_string())?;
 
+    let trace_dir = cfg
+        .trace_games_dir
+        .as_ref()
+        .map(|s| Path::new(s).to_path_buf());
+    if let Some(dir) = &trace_dir {
+        fs::create_dir_all(dir).map_err(|e| e.to_string())?;
+    }
+
     let mut engine_a = EngineProcess::spawn(&cfg.engine_a)?;
     let mut engine_b = EngineProcess::spawn(&cfg.engine_b)?;
     engine_a.init_ubgi()?;
@@ -249,7 +291,7 @@ fn main() -> Result<(), String> {
     let mut dice_gen = FastrandDice::with_seed(cfg.seed);
     let mut a_points = 0f32;
     let mut b_points = 0f32;
-    let mut draws = 0usize;
+    let mut incomplete = 0usize;
     let mut total_plies = 0usize;
     let mut a_decisions = 0usize;
     let mut b_decisions = 0usize;
@@ -261,6 +303,8 @@ fn main() -> Result<(), String> {
     let mut b_gammons = 0usize;
     let mut a_backgammons = 0usize;
     let mut b_backgammons = 0usize;
+    let mut a_normals = 0usize;
+    let mut b_normals = 0usize;
     let mut a_points_as_x = 0f32;
     let mut a_points_as_o = 0f32;
     let mut b_points_as_x = 0f32;
@@ -310,6 +354,36 @@ fn main() -> Result<(), String> {
         let points_o = result.points_o;
         let plies = result.plies;
 
+        if let Some(dir) = &trace_dir {
+            let trace_path = dir.join(format!("game_{:05}.log", game_idx + 1));
+            let mut trace = String::new();
+            trace.push_str(&format!(
+                "game={} engine_x={} engine_o={} winner={} plies={}\n",
+                game_idx + 1,
+                if a_is_x {
+                    &cfg.engine_a.name
+                } else {
+                    &cfg.engine_b.name
+                },
+                if a_is_x {
+                    &cfg.engine_b.name
+                } else {
+                    &cfg.engine_a.name
+                },
+                match winner_x {
+                    Some(true) => "x",
+                    Some(false) => "o",
+                    None => "incomplete",
+                },
+                plies,
+            ));
+            for line in &result.trace_lines {
+                trace.push_str(line);
+                trace.push('\n');
+            }
+            fs::write(trace_path, trace).map_err(|e| e.to_string())?;
+        }
+
         let winner_name = match winner_x {
             Some(true) => {
                 if a_is_x {
@@ -325,7 +399,7 @@ fn main() -> Result<(), String> {
                     &cfg.engine_a.name
                 }
             }
-            None => "draw",
+            None => "incomplete",
         };
 
         if a_is_x {
@@ -340,7 +414,7 @@ fn main() -> Result<(), String> {
             b_points_as_x += points_x;
         }
         if winner_x.is_none() {
-            draws += 1;
+            incomplete += 1;
         }
 
         let a_game_points = if a_is_x { points_x } else { points_o };
@@ -348,6 +422,7 @@ fn main() -> Result<(), String> {
         if a_game_points > 0.0 {
             a_wins += 1;
             match a_game_points.abs().round() as i32 {
+                1 => a_normals += 1,
                 2 => a_gammons += 1,
                 3 => a_backgammons += 1,
                 _ => {}
@@ -355,6 +430,7 @@ fn main() -> Result<(), String> {
         } else if b_game_points > 0.0 {
             b_wins += 1;
             match b_game_points.abs().round() as i32 {
+                1 => b_normals += 1,
                 2 => b_gammons += 1,
                 3 => b_backgammons += 1,
                 _ => {}
@@ -378,11 +454,15 @@ fn main() -> Result<(), String> {
             &cfg.engine_a.name
         };
 
-        let outcome = match points_x.abs().round() as i32 {
-            3 => "backgammon",
-            2 => "gammon",
-            1 => "normal",
-            _ => "unknown",
+        let outcome = if winner_x.is_none() {
+            "incomplete"
+        } else {
+            match points_x.abs().round() as i32 {
+                3 => "backgammon",
+                2 => "gammon",
+                1 => "normal",
+                _ => "unknown",
+            }
         };
 
         writeln!(
@@ -437,7 +517,9 @@ fn main() -> Result<(), String> {
                 b_gammons,
                 a_backgammons,
                 b_backgammons,
-                draws,
+                a_normals,
+                b_normals,
+                incomplete_count: incomplete,
                 a_points_as_x,
                 a_points_as_o,
                 b_points_as_x,
@@ -502,7 +584,9 @@ fn main() -> Result<(), String> {
             b_gammons,
             a_backgammons,
             b_backgammons,
-            draws,
+            a_normals,
+            b_normals,
+            incomplete_count: incomplete,
             a_points_as_x,
             a_points_as_o,
             b_points_as_x,
@@ -538,7 +622,9 @@ struct StatusView<'a> {
     b_gammons: usize,
     a_backgammons: usize,
     b_backgammons: usize,
-    draws: usize,
+    a_normals: usize,
+    b_normals: usize,
+    incomplete_count: usize,
     a_points_as_x: f32,
     a_points_as_o: f32,
     b_points_as_x: f32,
@@ -555,13 +641,7 @@ fn render_status_lines(s: StatusView<'_>) -> (String, String, String, String, St
     let line_engines = format!("ENGINES A={}  B={}", s.engine_a, s.engine_b);
     let line_result = format!(
         "RESULT A {:+.3} pts/g   B {:+.3} pts/g   (score {:+.1}/{:+.1} over {} games, win {:.1}/{:.1}%)",
-        s.a_avg_pts,
-        s.b_avg_pts,
-        s.a_points,
-        s.b_points,
-        s.games_done,
-        s.a_win_pct,
-        s.b_win_pct,
+        s.a_avg_pts, s.b_avg_pts, s.a_points, s.b_points, s.games_done, s.a_win_pct, s.b_win_pct,
     );
     let line_rate = format!(
         "RATE   {:.2} g/s   avg ply {:.1}   elapsed {:.2}s   eta {:.1}s",
@@ -572,8 +652,14 @@ fn render_status_lines(s: StatusView<'_>) -> (String, String, String, String, St
         s.a_avg_ms, s.b_avg_ms,
     );
     let line_class = format!(
-        "CLASS  gammons {}-{}   backgammons {}-{}   draws {}",
-        s.a_gammons, s.b_gammons, s.a_backgammons, s.b_backgammons, s.draws,
+        "CLASS  normal {}-{}   gammons {}-{}   backgammons {}-{}   incomplete {}",
+        s.a_normals,
+        s.b_normals,
+        s.a_gammons,
+        s.b_gammons,
+        s.a_backgammons,
+        s.b_backgammons,
+        s.incomplete_count,
     );
     let line_sides = format!(
         "SIDES  A X:{:+.1} O:{:+.1}   B X:{:+.1} O:{:+.1}",
@@ -602,6 +688,7 @@ fn play_game(
     let mut b_decisions = 0usize;
     let mut a_decision_sec = 0f64;
     let mut b_decision_sec = 0f64;
+    let mut trace_lines = Vec::new();
 
     for ply in 0..max_plies {
         let dice = if ply == 0 {
@@ -620,6 +707,7 @@ fn play_game(
                 b_decisions,
                 a_decision_sec,
                 b_decision_sec,
+                trace_lines,
             });
         }
         let legal_ids: Vec<String> = legal.iter().map(|p| p.position_id()).collect();
@@ -628,20 +716,67 @@ fn play_game(
         let a_to_move = x_to_move == a_is_x;
 
         let decision_start = Instant::now();
-        let chosen_id = if a_to_move {
-            let picked = engine_a.choose_move_id(&position_id, dice)?;
+        let chosen_id_raw = if a_to_move {
+            let picked = engine_a.choose_move_id(&position_id, dice, x_to_move)?;
             a_decisions += 1;
             a_decision_sec += decision_start.elapsed().as_secs_f64();
             picked
         } else {
-            let picked = engine_b.choose_move_id(&position_id, dice)?;
+            let picked = engine_b.choose_move_id(&position_id, dice, x_to_move)?;
             b_decisions += 1;
             b_decision_sec += decision_start.elapsed().as_secs_f64();
             picked
         };
 
-        let next = choose_legal_from_id(&legal, &legal_ids, &chosen_id)
-            .unwrap_or_else(|| fallback_position(&legal));
+        let chosen_id = variant
+            .from_position_id(&chosen_id_raw)
+            .map(|p| p.position_id())
+            .unwrap_or(chosen_id_raw.clone());
+
+        let (d1, d2) = match dice {
+            Dice::Double(d) => (d, d),
+            Dice::Mixed(m) => (m.big(), m.small()),
+        };
+
+        trace_lines.push(format!(
+            "ply={} turn={} dice={}/{} pos={} choice={} legal_count={}",
+            ply + 1,
+            if a_to_move { "A" } else { "B" },
+            d1,
+            d2,
+            position_id,
+            chosen_id,
+            legal.len(),
+        ));
+        if chosen_id != chosen_id_raw {
+            trace_lines.push(format!(
+                "choice_raw={} choice_canonical={}",
+                chosen_id_raw, chosen_id
+            ));
+        }
+
+        let next = match choose_legal_from_id(&legal, &legal_ids, &chosen_id) {
+            Some(pos) => pos,
+            None => {
+                let preview = legal_ids
+                    .iter()
+                    .take(12)
+                    .cloned()
+                    .collect::<Vec<_>>()
+                    .join(",");
+                return Err(format!(
+                    "engine returned illegal move id: turn={} pos={} dice={}/{} choice_raw={} choice={} legal_count={} legal_preview={}",
+                    if a_to_move { "A" } else { "B" },
+                    position_id,
+                    d1,
+                    d2,
+                    chosen_id_raw,
+                    chosen_id,
+                    legal_ids.len(),
+                    preview,
+                ));
+            }
+        };
 
         game.set_position(next)
             .map_err(|e| format!("failed to set position: {e}"))?;
@@ -663,6 +798,7 @@ fn play_game(
                 b_decisions,
                 a_decision_sec,
                 b_decision_sec,
+                trace_lines,
             });
         }
     }
@@ -676,6 +812,7 @@ fn play_game(
         b_decisions,
         a_decision_sec,
         b_decision_sec,
+        trace_lines,
     })
 }
 
@@ -688,10 +825,6 @@ fn choose_legal_from_id(
         .iter()
         .position(|candidate| candidate == id)
         .map(|idx| legal[idx])
-}
-
-fn fallback_position(legal: &[VariantPosition]) -> VariantPosition {
-    legal[0]
 }
 
 fn parse_variant(name: &str) -> Result<Variant, String> {

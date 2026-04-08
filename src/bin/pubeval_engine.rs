@@ -1,15 +1,13 @@
 use std::io::{self, BufRead, Write};
 
 use bkgm::dice::Dice;
-use bkgm::dice_gen::{DiceGen, FastrandDice};
-use bkgm::{Game, Variant, VariantPosition};
+use bkgm::{Game, State, Variant, VariantPosition};
 
 fn main() {
     let stdin = io::stdin();
     let mut stdout = io::stdout();
     let mut game = Game::new(Variant::Backgammon);
     let mut dice: Option<Dice> = None;
-    let mut rng = FastrandDice::new();
 
     for line in stdin.lock().lines() {
         let Ok(line) = line else {
@@ -21,7 +19,7 @@ fn main() {
         }
 
         if cmd == "ubgi" {
-            reply(&mut stdout, "id name random_engine 0.1");
+            reply(&mut stdout, "id name pubeval_engine 0.1");
             reply(&mut stdout, "id author bgci");
             reply(&mut stdout, "id version 0.1");
             reply(&mut stdout, "ubgiok");
@@ -81,8 +79,17 @@ fn main() {
                 reply(&mut stdout, "error missing_context legal_moves");
                 continue;
             }
-            let index = rng.choose_index(&vec![1.0; legal.len()]);
-            let chosen: VariantPosition = legal[index];
+
+            let mut best_idx = 0usize;
+            let mut best_value = evaluate_position(legal[0]);
+            for (idx, pos) in legal.iter().enumerate().skip(1) {
+                let value = evaluate_position(*pos);
+                if value > best_value {
+                    best_value = value;
+                    best_idx = idx;
+                }
+            }
+            let chosen: VariantPosition = legal[best_idx];
             reply(&mut stdout, &format!("bestmoveid {}", chosen.position_id()));
             continue;
         }
@@ -93,6 +100,57 @@ fn main() {
 
         reply(&mut stdout, "error unknown_command");
     }
+}
+
+fn evaluate_position(position: VariantPosition) -> f32 {
+    match position {
+        VariantPosition::Backgammon(p) => eval_state(p),
+        VariantPosition::Nackgammon(p) => eval_state(p),
+        VariantPosition::Longgammon(p) => eval_state(p),
+        VariantPosition::Hypergammon(p) => eval_state(p),
+        VariantPosition::Hypergammon2(p) => eval_state(p),
+        VariantPosition::Hypergammon4(p) => eval_state(p),
+        VariantPosition::Hypergammon5(p) => eval_state(p),
+    }
+}
+
+fn eval_state<S: State>(p: S) -> f32 {
+    let mut x_pips = 0f32;
+    let mut o_pips = 0f32;
+    let mut x_blots = 0f32;
+    let mut o_blots = 0f32;
+
+    for pip in 1..=24 {
+        let n = p.pip(pip);
+        if n > 0 {
+            x_pips += (n as f32) * pip as f32;
+            if n == 1 {
+                x_blots += 1.0;
+            }
+        } else if n < 0 {
+            o_pips += ((-n) as f32) * (25 - pip) as f32;
+            if n == -1 {
+                o_blots += 1.0;
+            }
+        }
+    }
+
+    x_pips += (p.x_bar() as f32) * 25.0;
+    o_pips += (p.o_bar() as f32) * 25.0;
+
+    let x_borne = p.x_off() as f32;
+    let o_borne = p.o_off() as f32;
+
+    let x_score = -x_pips + (x_borne * 22.0) - (x_blots * 2.0) - (p.x_bar() as f32) * 3.0;
+    let o_score = -o_pips + (o_borne * 22.0) - (o_blots * 2.0) - (p.o_bar() as f32) * 3.0;
+
+    let on_roll_value = if p.turn() {
+        x_score - o_score
+    } else {
+        o_score - x_score
+    };
+
+    (on_roll_value / 200.0).clamp(-3.0, 3.0)
 }
 
 fn reply(out: &mut impl Write, line: &str) {
