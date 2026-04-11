@@ -1,14 +1,10 @@
 # bgci
 
-`bgci` is a lightweight UBGI duel runner for backgammon engines.
+bgci is a lightweight runner for the Universal Backgammon Interface (UBGI), a work-in-progress protocol for backgammon engine communication and control. It provides duel orchestration, logging, and result collection so you can quickly configure and run matches between different engines.
 
-Based on the UCI model:
+![bgci pubeval vs random](docs/pubeval-vs-random.gif)
 
-- `https://en.wikipedia.org/wiki/Universal_Chess_Interface`
-
-Based on early UBGI protocol work by Øystein Schønning-Johansen:
-
-- `https://github.com/oysteijo/Universal-Backgammon-Interface`
+UBGI is inspired by the chess Universal Chess Interface (UCI) and defines a simple, engine-agnostic protocol for exchanging moves, diagnostics, and match metadata. bgci implements UBGI's duel-management features, making it easy to set up tournaments, capture per-game traces, and export results. Based on early UBGI protocol work by Øystein Schønning-Johansen [here](https://github.com/oysteijo/Universal-Backgammon-Interface)
 
 ## Quick Start
 
