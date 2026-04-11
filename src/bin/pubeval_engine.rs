@@ -1,12 +1,14 @@
 use std::io::{self, BufRead, Write};
 
+use bgci::common::parse_variant_setoption;
 use bkgm::dice::Dice;
 use bkgm::{Game, State, Variant, VariantPosition};
 
 fn main() {
     let stdin = io::stdin();
     let mut stdout = io::stdout();
-    let mut game = Game::new(Variant::Backgammon);
+    let mut variant = Variant::Backgammon;
+    let mut game = Game::new(variant);
     let mut dice: Option<Dice> = None;
 
     for line in stdin.lock().lines() {
@@ -22,6 +24,10 @@ fn main() {
             reply(&mut stdout, "id name pubeval_engine 0.1");
             reply(&mut stdout, "id author bgci");
             reply(&mut stdout, "id version 0.1");
+            reply(
+                &mut stdout,
+                "option name Variant type combo default backgammon var backgammon var nackgammon var longgammon var hypergammon var hypergammon2 var hypergammon4 var hypergammon5",
+            );
             reply(&mut stdout, "ubgiok");
             continue;
         }
@@ -32,13 +38,24 @@ fn main() {
         }
 
         if cmd == "newgame" {
-            game = Game::new(Variant::Backgammon);
+            game = Game::new(variant);
             dice = None;
             continue;
         }
 
+        if let Some(parsed_variant) = parse_variant_setoption(cmd) {
+            match parsed_variant {
+                Ok(v) => {
+                    variant = v;
+                    game = Game::new(variant);
+                }
+                Err(_) => reply(&mut stdout, "error bad_argument variant"),
+            }
+            continue;
+        }
+
         if let Some(id) = cmd.strip_prefix("position gnubgid ") {
-            match Variant::Backgammon.from_position_id(id.trim()) {
+            match variant.from_position_id(id.trim()) {
                 Some(pos) => {
                     let _ = game.set_position(pos);
                 }

@@ -1,0 +1,17 @@
+games = 100
+seed = 42
+max_plies = 512
+swap_sides = true
+variant = "backgammon"
+log = "info"
+output_csv = "artifacts/duels/gnubg-cli-vs-pubeval/results.csv"
+trace_games_dir = "artifacts/duels/gnubg-cli-vs-pubeval/games"
+
+[engine_a]
+name = "gnubg-cli"
+command = ["cargo", "run", "--quiet", "--bin", "gnubg_engine"]
+env = { BGCI_GNUBG_DEBUG_LOG = "artifacts/duels/gnubg-cli-vs-pubeval/gnubg-debug.log", BGCI_GNUBG_TRACE_LOG = "artifacts/duels/gnubg-cli-vs-pubeval/gnubg-trace.log" }
+
+[engine_b]
+name = "pubeval"
+command = ["cargo", "run", "--quiet", "--bin", "pubeval_engine"]

@@ -1,13 +1,10 @@
 use std::fs::OpenOptions;
 use std::io::{self, BufRead, BufReader, Write};
-use std::path::Path;
 use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
 
+use bgci::common::parse_variant_setoption;
 use bkgm::dice::Dice;
 use bkgm::{Game, Variant};
-
-const DEFAULT_GNUBG_BIN: &str = "/Users/jonathan/projects/backgammon/gnubg-cli/bin/gnubg";
-const DEFAULT_GNUBG_PKGDATADIR: &str = "/Users/jonathan/projects/backgammon/gnubg-cli/share/gnubg";
 
 struct GnubgSession {
     child: Child,
@@ -50,6 +47,8 @@ impl GnubgSession {
         let _ = session.run_batch(&[
             "set player 0 human".to_string(),
             "set player 1 human".to_string(),
+            "set player 0 name p_x".to_string(),
+            "set player 1 name p_o".to_string(),
             "set display off".to_string(),
         ])?;
 
@@ -103,7 +102,8 @@ impl GnubgSession {
 fn main() {
     let stdin = io::stdin();
     let mut stdout = io::stdout();
-    let mut game = Game::new(Variant::Backgammon);
+    let mut variant = Variant::Backgammon;
+    let mut game = Game::new(variant);
     let mut dice: Option<Dice> = None;
 
     let gnubg_bin = resolve_gnubg_bin();
@@ -124,6 +124,10 @@ fn main() {
             reply(&mut stdout, "id name gnubg_engine 0.3");
             reply(&mut stdout, "id author bgci");
             reply(&mut stdout, "id version 0.3");
+            reply(
+                &mut stdout,
+                "option name Variant type combo default backgammon var backgammon var nackgammon var longgammon var hypergammon var hypergammon2 var hypergammon4 var hypergammon5",
+            );
             reply(&mut stdout, "ubgiok");
             continue;
         }
@@ -140,13 +144,24 @@ fn main() {
         }
 
         if cmd == "newgame" {
-            game = Game::new(Variant::Backgammon);
+            game = Game::new(variant);
             dice = None;
             continue;
         }
 
+        if let Some(parsed_variant) = parse_variant_setoption(cmd) {
+            match parsed_variant {
+                Ok(v) => {
+                    variant = v;
+                    game = Game::new(variant);
+                }
+                Err(_) => reply(&mut stdout, "error bad_argument variant"),
+            }
+            continue;
+        }
+
         if let Some(id) = cmd.strip_prefix("position gnubgid ") {
-            match Variant::Backgammon.from_position_id(id.trim()) {
+            match variant.from_position_id(id.trim()) {
                 Some(pos) => {
                     let _ = game.set_position(pos);
                 }
@@ -257,7 +272,7 @@ fn choose_best_legal_by_eval(
         return Err("no_legal_ids".to_string());
     }
 
-    let turn = if child_x_to_move { "jonathan" } else { "gnubg" };
+    let turn = if child_x_to_move { "p_x" } else { "p_o" };
     let mut commands = vec!["new game".to_string()];
     for (idx, id) in legal_ids.iter().enumerate() {
         commands.push(format!("set board {id}"));
@@ -361,18 +376,12 @@ fn resolve_gnubg_bin() -> String {
     if let Ok(bin) = std::env::var("BGCI_GNUBG_BIN") {
         return bin;
     }
-    if Path::new(DEFAULT_GNUBG_BIN).exists() {
-        return DEFAULT_GNUBG_BIN.to_string();
-    }
     "gnubg".to_string()
 }
 
 fn resolve_gnubg_pkgdatadir() -> Option<String> {
     if let Ok(dir) = std::env::var("BGCI_GNUBG_PKGDATADIR") {
         return Some(dir);
-    }
-    if Path::new(DEFAULT_GNUBG_PKGDATADIR).exists() {
-        return Some(DEFAULT_GNUBG_PKGDATADIR.to_string());
     }
     None
 }

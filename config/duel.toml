@@ -3,11 +3,12 @@ seed = 42
 max_plies = 512
 swap_sides = true
 variant = "backgammon"
-output_csv = "artifacts/duels/yellowknife-vs-random/results-100.csv"
+log = "off"
+output_csv = "artifacts/duels/latest/results.csv"
 
 [engine_a]
-name = "yellowknife-td"
-command = ["cargo", "run", "--quiet", "--manifest-path", "../yellowknife/Cargo.toml", "--bin", "ubgi_engine"]
+name = "random-a"
+command = ["cargo", "run", "--quiet", "--bin", "random_engine"]
 
 [engine_b]
 name = "random"
