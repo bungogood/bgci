@@ -1,5 +1,13 @@
 # UBGI v0.1 Draft Spec
 
+Acknowledgement: this implementation draft builds on early UBGI work by Øystein Schønning-Johansen:
+
+- `https://github.com/oysteijo/Universal-Backgammon-Interface`
+
+It also references practical engine integration with GNU Backgammon (GNUbg):
+
+- `https://www.gnu.org/software/gnubg/`
+
 UBGI (Universal Backgammon Interface) is a line-based text protocol for GUI/dueller-to-engine communication.
 
 This draft focuses on the mandatory core: **best action selection**.

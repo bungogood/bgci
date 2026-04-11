@@ -6,19 +6,27 @@ pub struct RunPaths {
     pub timestamp: String,
     pub output_csv: PathBuf,
     pub log_file: PathBuf,
+    pub trace_games_dir: PathBuf,
 }
 
-pub fn build_run_paths(base_output_csv: &Path) -> RunPaths {
+pub fn build_run_paths(engine_a: &str, engine_b: &str) -> RunPaths {
     let timestamp = run_timestamp();
-    let output_csv = timestamped_file_path(base_output_csv, &timestamp);
+    let matchup = format!("{}-vs-{}", slug(engine_a), slug(engine_b));
+    let root = Path::new("data").join(matchup);
+    let output_csv = root.join(format!("results-{timestamp}.csv"));
     let log_file = output_csv
         .parent()
         .unwrap_or_else(|| Path::new("."))
         .join(format!("duel-{timestamp}.log"));
+    let trace_games_dir = output_csv
+        .parent()
+        .unwrap_or_else(|| Path::new("."))
+        .join(format!("games-{timestamp}"));
     RunPaths {
         timestamp,
         output_csv,
         log_file,
+        trace_games_dir,
     }
 }
 
@@ -35,17 +43,23 @@ fn run_timestamp() -> String {
     )
 }
 
-fn timestamped_file_path(base: &Path, stamp: &str) -> PathBuf {
-    let parent = base.parent().unwrap_or_else(|| Path::new("."));
-    let stem = base
-        .file_stem()
-        .and_then(|s| s.to_str())
-        .filter(|s| !s.is_empty())
-        .unwrap_or("results");
-    let ext = base.extension().and_then(|e| e.to_str());
-    let file_name = match ext {
-        Some(ext) if !ext.is_empty() => format!("{stem}-{stamp}.{ext}"),
-        _ => format!("{stem}-{stamp}"),
-    };
-    parent.join(file_name)
+fn slug(name: &str) -> String {
+    let mut out = String::new();
+    let mut prev_dash = false;
+    for ch in name.chars() {
+        let c = ch.to_ascii_lowercase();
+        if c.is_ascii_alphanumeric() {
+            out.push(c);
+            prev_dash = false;
+        } else if !prev_dash {
+            out.push('-');
+            prev_dash = true;
+        }
+    }
+    let out = out.trim_matches('-').to_string();
+    if out.is_empty() {
+        "engine".to_string()
+    } else {
+        out
+    }
 }

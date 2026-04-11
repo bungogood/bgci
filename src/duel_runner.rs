@@ -1,6 +1,5 @@
 use std::fs;
 use std::io::{BufWriter, Write};
-use std::path::Path;
 use std::time::Instant;
 
 use bkgm::dice::Dice;
@@ -11,6 +10,7 @@ use tracing::debug;
 
 use crate::config::DuelConfig;
 use crate::engine::EngineProcess;
+use crate::output_paths::RunPaths;
 use crate::report::render_status_lines;
 use crate::stats::{DuelStats, GameUpdate};
 
@@ -26,12 +26,12 @@ pub struct RunSummary {
 pub fn run_duel(
     cfg: &DuelConfig,
     variant: Variant,
-    output_path: &Path,
+    paths: &RunPaths,
 ) -> Result<RunSummary, String> {
-    if let Some(parent) = output_path.parent() {
+    if let Some(parent) = paths.output_csv.parent() {
         fs::create_dir_all(parent).map_err(|e| e.to_string())?;
     }
-    let file = fs::File::create(output_path).map_err(|e| e.to_string())?;
+    let file = fs::File::create(&paths.output_csv).map_err(|e| e.to_string())?;
     let mut csv = BufWriter::new(file);
     writeln!(
         csv,
@@ -40,13 +40,8 @@ pub fn run_duel(
     .map_err(|e| e.to_string())?;
     csv.flush().map_err(|e| e.to_string())?;
 
-    let trace_dir = cfg
-        .trace_games_dir
-        .as_ref()
-        .map(|s| Path::new(s).to_path_buf());
-    if let Some(dir) = &trace_dir {
-        fs::create_dir_all(dir).map_err(|e| e.to_string())?;
-    }
+    let trace_dir = paths.trace_games_dir.clone();
+    fs::create_dir_all(&trace_dir).map_err(|e| e.to_string())?;
 
     let mut engine_a = EngineProcess::spawn(&cfg.engine_a)?;
     let mut engine_b = EngineProcess::spawn(&cfg.engine_b)?;
@@ -97,35 +92,33 @@ pub fn run_duel(
             a_is_x,
         )?;
 
-        if let Some(dir) = &trace_dir {
-            let trace_path = dir.join(format!("game_{:05}.log", game_idx + 1));
-            let mut trace = String::new();
-            trace.push_str(&format!(
-                "game={} engine_x={} engine_o={} winner={} plies={}\n",
-                game_idx + 1,
-                if a_is_x {
-                    &cfg.engine_a.name
-                } else {
-                    &cfg.engine_b.name
-                },
-                if a_is_x {
-                    &cfg.engine_b.name
-                } else {
-                    &cfg.engine_a.name
-                },
-                match result.winner_x {
-                    Some(true) => "x",
-                    Some(false) => "o",
-                    None => "incomplete",
-                },
-                result.plies,
-            ));
-            for line in &result.trace_lines {
-                trace.push_str(line);
-                trace.push('\n');
-            }
-            fs::write(trace_path, trace).map_err(|e| e.to_string())?;
+        let trace_path = trace_dir.join(format!("game_{:05}.log", game_idx + 1));
+        let mut trace = String::new();
+        trace.push_str(&format!(
+            "game={} engine_x={} engine_o={} winner={} plies={}\n",
+            game_idx + 1,
+            if a_is_x {
+                &cfg.engine_a.name
+            } else {
+                &cfg.engine_b.name
+            },
+            if a_is_x {
+                &cfg.engine_b.name
+            } else {
+                &cfg.engine_a.name
+            },
+            match result.winner_x {
+                Some(true) => "x",
+                Some(false) => "o",
+                None => "incomplete",
+            },
+            result.plies,
+        ));
+        for line in &result.trace_lines {
+            trace.push_str(line);
+            trace.push('\n');
         }
+        fs::write(trace_path, trace).map_err(|e| e.to_string())?;
 
         debug!(
             game = game_idx + 1,

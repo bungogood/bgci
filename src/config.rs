@@ -4,8 +4,6 @@ use std::path::Path;
 
 use serde::Deserialize;
 
-pub const DUEL_CONFIG_PATH: &str = "config/duel.toml";
-
 #[derive(Debug, Clone, Deserialize)]
 #[serde(default)]
 pub struct DuelConfig {
@@ -15,8 +13,6 @@ pub struct DuelConfig {
     pub swap_sides: bool,
     pub variant: String,
     pub log: String,
-    pub output_csv: String,
-    pub trace_games_dir: Option<String>,
     pub engine_a: EngineConfig,
     pub engine_b: EngineConfig,
 }
@@ -30,8 +26,6 @@ impl Default for DuelConfig {
             swap_sides: true,
             variant: "backgammon".to_string(),
             log: "off".to_string(),
-            output_csv: "artifacts/duels/latest/results.csv".to_string(),
-            trace_games_dir: None,
             engine_a: EngineConfig::default_a(),
             engine_b: EngineConfig::default_b(),
         }

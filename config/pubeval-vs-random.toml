@@ -4,8 +4,6 @@ max_plies = 512
 swap_sides = true
 variant = "backgammon"
 log = "info"
-output_csv = "artifacts/duels/pubeval-vs-random/results.csv"
-trace_games_dir = "artifacts/duels/pubeval-vs-random/games"
 
 [engine_a]
 name = "pubeval"

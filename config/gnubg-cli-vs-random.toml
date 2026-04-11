@@ -4,13 +4,10 @@ max_plies = 512
 swap_sides = true
 variant = "backgammon"
 log = "info"
-output_csv = "artifacts/duels/gnubg-cli-vs-random/results.csv"
-trace_games_dir = "artifacts/duels/gnubg-cli-vs-random/games"
 
 [engine_a]
 name = "gnubg-cli"
 command = ["cargo", "run", "--quiet", "--bin", "gnubg_engine"]
-env = { BGCI_GNUBG_DEBUG_LOG = "artifacts/duels/gnubg-cli-vs-random/gnubg-debug.log", BGCI_GNUBG_TRACE_LOG = "artifacts/duels/gnubg-cli-vs-random/gnubg-trace.log" }
 
 [engine_b]
 name = "random"
