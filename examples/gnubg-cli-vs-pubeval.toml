@@ -7,8 +7,8 @@ log = "info"
 
 [engine_a]
 name = "gnubg-cli"
-command = ["cargo", "run", "--quiet", "--bin", "gnubg_engine"]
+command = ["cargo", "run", "--release", "--quiet", "--bin", "gnubg_engine"]
 
 [engine_b]
 name = "pubeval"
-command = ["cargo", "run", "--quiet", "--bin", "pubeval_engine"]
+command = ["cargo", "run", "--release", "--quiet", "--bin", "pubeval_engine"]

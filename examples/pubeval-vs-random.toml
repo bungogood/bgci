@@ -7,8 +7,8 @@ log = "info"
 
 [engine_a]
 name = "pubeval"
-command = ["cargo", "run", "--quiet", "--bin", "pubeval_engine"]
+command = ["cargo", "run", "--release", "--quiet", "--bin", "pubeval_engine"]
 
 [engine_b]
 name = "random"
-command = ["cargo", "run", "--quiet", "--bin", "random_engine"]
+command = ["cargo", "run", "--release", "--quiet", "--bin", "random_engine"]
