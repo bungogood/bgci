@@ -101,7 +101,7 @@ impl GnubgSession {
     }
 }
 
-pub fn run() {
+pub fn run(_args: &[String]) -> Result<(), String> {
     let mut adapter = GnubgCliAdapter {
         gnubg_bin: resolve_gnubg_bin(),
         gnubg_pkgdatadir: resolve_gnubg_pkgdatadir(),
@@ -111,6 +111,7 @@ pub fn run() {
     if let Some(mut s) = adapter.session {
         s.shutdown();
     }
+    Ok(())
 }
 
 struct GnubgCliAdapter {

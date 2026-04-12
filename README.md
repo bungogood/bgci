@@ -34,6 +34,7 @@ cargo run -- check --engine pubeval
 
 Built-in engines can now be referenced directly in config using `engine`:
 
+- `engine = "pipcount"`
 - `engine = "pubeval"`
 - `engine = "random"`
 - `engine = "gnubg-cli"`
@@ -72,7 +73,17 @@ cargo run -- engine --list
 
 # include source/command/env for each alias
 cargo run -- engine --list --verbose
+
+# run an engine directly and pass extra args through
+cargo run -- engine pubeval -- --weights-dir ./my-weights
 ```
+
+`pubeval` ships with embedded default weights, so it works from any working directory.
+You can override with:
+
+- `--weights-race <path>`
+- `--weights-contact <path>`
+- `--weights-dir <dir>` (expects `WT.race` and `WT.cntc`)
 
 ## Public Duel Configs
 

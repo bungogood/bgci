@@ -8,6 +8,9 @@ use crate::config::{list_engine_alias_details, list_engine_aliases, resolve_engi
 pub struct EngineArgs {
     kind: Option<String>,
 
+    #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+    engine_args: Vec<String>,
+
     #[arg(short = 'l', long)]
     list: bool,
 
@@ -19,6 +22,9 @@ pub fn run(args: EngineArgs) -> Result<(), String> {
     if args.list {
         if args.kind.is_some() {
             return Err("--list cannot be used with an engine kind".to_string());
+        }
+        if !args.engine_args.is_empty() {
+            return Err("extra engine args are not allowed with --list".to_string());
         }
         if args.verbose {
             for detail in list_engine_alias_details()? {
@@ -49,16 +55,17 @@ pub fn run(args: EngineArgs) -> Result<(), String> {
     };
 
     if let Some(builtin) = engines::builtin_engine_name(&kind.to_ascii_lowercase()) {
-        return engines::run_by_name(builtin);
+        return engines::run_by_name_with_args(builtin, &args.engine_args);
     }
 
     let engine = resolve_engine_reference(&kind)?;
-    run_external_engine(&engine.command, &engine.env)
+    run_external_engine(&engine.command, &engine.env, &args.engine_args)
 }
 
 fn run_external_engine(
     command: &[String],
     env: &std::collections::BTreeMap<String, String>,
+    extra_args: &[String],
 ) -> Result<(), String> {
     if command.is_empty() {
         return Err("engine command cannot be empty".to_string());
@@ -67,6 +74,9 @@ fn run_external_engine(
     let mut cmd = Command::new(&command[0]);
     if command.len() > 1 {
         cmd.args(&command[1..]);
+    }
+    if !extra_args.is_empty() {
+        cmd.args(extra_args);
     }
     for (key, value) in env {
         cmd.env(key, value);

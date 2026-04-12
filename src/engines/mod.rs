@@ -1,19 +1,24 @@
 mod gnubg_cli;
+mod pipcount;
 mod pubeval;
 mod random;
 mod runtime;
 
-pub const BUILTIN_ENGINE_NAMES: [&str; 3] = ["gnubg-cli", "pubeval", "random"];
+pub const BUILTIN_ENGINE_NAMES: [&str; 4] = ["gnubg-cli", "pipcount", "pubeval", "random"];
 
 struct BuiltinEngine {
     name: &'static str,
-    run: fn(),
+    run: fn(&[String]) -> Result<(), String>,
 }
 
-const BUILTIN_ENGINES: [BuiltinEngine; 3] = [
+const BUILTIN_ENGINES: [BuiltinEngine; 4] = [
     BuiltinEngine {
         name: "gnubg-cli",
         run: gnubg_cli::run,
+    },
+    BuiltinEngine {
+        name: "pipcount",
+        run: pipcount::run,
     },
     BuiltinEngine {
         name: "pubeval",
@@ -33,9 +38,12 @@ pub fn builtin_engine_name(alias: &str) -> Option<&'static str> {
 }
 
 pub fn run_by_name(kind: &str) -> Result<(), String> {
+    run_by_name_with_args(kind, &[])
+}
+
+pub fn run_by_name_with_args(kind: &str, args: &[String]) -> Result<(), String> {
     let Some(engine) = BUILTIN_ENGINES.iter().find(|engine| engine.name == kind) else {
         return Err(format!("unknown builtin engine kind '{kind}'"));
     };
-    (engine.run)();
-    Ok(())
+    (engine.run)(args)
 }

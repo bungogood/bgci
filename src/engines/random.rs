@@ -3,9 +3,10 @@ use bkgm::Game;
 
 use super::runtime::{run_ubgi_loop, UbgiAdapter};
 
-pub fn run() {
+pub fn run(_args: &[String]) -> Result<(), String> {
     let mut adapter = RandomAdapter;
     run_ubgi_loop(&mut adapter);
+    Ok(())
 }
 
 struct RandomAdapter;
