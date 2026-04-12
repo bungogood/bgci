@@ -4,16 +4,16 @@ use bkgm::{Game, State, VariantPosition};
 use super::runtime::{run_ubgi_loop, UbgiAdapter};
 
 pub fn run(_args: &[String]) -> Result<(), String> {
-    let mut adapter = PipcountAdapter;
+    let mut adapter = HandcraftedAdapter;
     run_ubgi_loop(&mut adapter);
     Ok(())
 }
 
-struct PipcountAdapter;
+struct HandcraftedAdapter;
 
-impl UbgiAdapter for PipcountAdapter {
+impl UbgiAdapter for HandcraftedAdapter {
     fn id_name(&self) -> &'static str {
-        "pipcount_engine 0.1"
+        "hureval_engine 0.1"
     }
 
     fn id_version(&self) -> &'static str {
@@ -58,32 +58,37 @@ fn evaluate_position(position: VariantPosition) -> f32 {
 fn eval_state<S: State>(p: S) -> f32 {
     let mut x_pips = 0f32;
     let mut o_pips = 0f32;
+    let mut x_blots = 0f32;
+    let mut o_blots = 0f32;
     for pip in 1..=24 {
         let n = p.pip(pip);
         if n > 0 {
             x_pips += (n as f32) * pip as f32;
+            if n == 1 {
+                x_blots += 1.0;
+            }
         } else if n < 0 {
             o_pips += ((-n) as f32) * (25 - pip) as f32;
+            if n == -1 {
+                o_blots += 1.0;
+            }
         }
     }
 
     x_pips += (p.x_bar() as f32) * 25.0;
     o_pips += (p.o_bar() as f32) * 25.0;
 
-    let x_off = p.x_off() as f32;
-    let o_off = p.o_off() as f32;
-    let x_bar = p.x_bar() as f32;
-    let o_bar = p.o_bar() as f32;
+    let x_borne = p.x_off() as f32;
+    let o_borne = p.o_off() as f32;
 
-    let pip_term = (o_pips - x_pips) * 0.02;
-    let off_term = (x_off - o_off) * 0.35;
-    let bar_term = (o_bar - x_bar) * 0.20;
+    let x_score = -x_pips + (x_borne * 22.0) - (x_blots * 2.0) - (p.x_bar() as f32) * 3.0;
+    let o_score = -o_pips + (o_borne * 22.0) - (o_blots * 2.0) - (p.o_bar() as f32) * 3.0;
 
     let on_roll_value = if p.turn() {
-        pip_term + off_term + bar_term
+        x_score - o_score
     } else {
-        -(pip_term + off_term + bar_term)
+        o_score - x_score
     };
 
-    on_roll_value.clamp(-3.0, 3.0)
+    (on_roll_value / 200.0).clamp(-3.0, 3.0)
 }

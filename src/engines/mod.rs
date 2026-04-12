@@ -1,20 +1,26 @@
 mod gnubg_cli;
+mod hureval;
 mod pipcount;
 mod pubeval;
 mod random;
 mod runtime;
 
-pub const BUILTIN_ENGINE_NAMES: [&str; 4] = ["gnubg-cli", "pipcount", "pubeval", "random"];
+pub const BUILTIN_ENGINE_NAMES: [&str; 5] =
+    ["gnubg-cli", "hureval", "pipcount", "pubeval", "random"];
 
 struct BuiltinEngine {
     name: &'static str,
     run: fn(&[String]) -> Result<(), String>,
 }
 
-const BUILTIN_ENGINES: [BuiltinEngine; 4] = [
+const BUILTIN_ENGINES: [BuiltinEngine; 5] = [
     BuiltinEngine {
         name: "gnubg-cli",
         run: gnubg_cli::run,
+    },
+    BuiltinEngine {
+        name: "hureval",
+        run: hureval::run,
     },
     BuiltinEngine {
         name: "pipcount",

@@ -38,6 +38,7 @@ cargo run -- check --engine pubeval
 Built-in engines can now be referenced directly in config using `engine`:
 
 - `engine = "pipcount"`
+- `engine = "hureval"`
 - `engine = "pubeval"`
 - `engine = "random"`
 - `engine = "gnubg-cli"`
