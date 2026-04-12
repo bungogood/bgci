@@ -7,8 +7,8 @@ log = "info"
 
 [engine_a]
 name = "gnubg-cli"
-command = ["cargo", "run", "--release", "--quiet", "--bin", "gnubg_engine"]
+engine = "gnubg-cli"
 
 [engine_b]
 name = "random"
-command = ["cargo", "run", "--release", "--quiet", "--bin", "random_engine"]
+engine = "random"

@@ -8,16 +8,70 @@ UBGI is inspired by the chess Universal Chess Interface (UCI) and defines a simp
 
 ## Quick Start
 
-`--config` is required. Run baseline example:
+Run baseline example from a duel config:
 
 ```bash
-cargo run -- --config examples/pubeval-vs-random.toml
+cargo run -- duel --config examples/pubeval-vs-random.toml
 ```
 
 Run GNUbg adapter vs random:
 
 ```bash
-cargo run -- --config examples/gnubg-cli-vs-random.toml
+cargo run -- duel --config examples/gnubg-cli-vs-random.toml
+```
+
+Run a duel directly without a duel config file:
+
+```bash
+cargo run -- duel --engine-a gnubg --engine-b pubeval --games 1000
+```
+
+Run an engine protocol check directly from an alias:
+
+```bash
+cargo run -- check --engine pubeval
+```
+
+Built-in engines can now be referenced directly in config using `engine`:
+
+- `engine = "pubeval"`
+- `engine = "random"`
+- `engine = "gnubg-cli"`
+
+Use `command = ["..."]` only for ad-hoc direct process commands.
+
+You can also define reusable engine shortcuts in user config (`$XDG_CONFIG_HOME/bgci/config.toml` or `~/.config/bgci/config.toml`):
+
+```toml
+[engines.xg]
+command = ["xg", "--ubgi"]
+
+[engines.gnubg-local]
+command = "gnubg-cli"
+env = { BGCI_GNUBG_BIN = "/opt/homebrew/bin/gnubg" }
+```
+
+Then duel configs can stay lightweight:
+
+```toml
+[engine_a]
+name = "xg"
+engine = "xg"
+
+[engine_b]
+name = "pubeval"
+engine = "pubeval"
+```
+
+Set `BGCI_CONFIG=/path/to/config.toml` to override the default user config path.
+
+List all available engine aliases (built-ins + user config):
+
+```bash
+cargo run -- engine --list
+
+# include source/command/env for each alias
+cargo run -- engine --list --verbose
 ```
 
 ## Public Duel Configs
@@ -50,5 +104,5 @@ See `docs/ubgi-v0.1-spec.md`.
 
 GNU Backgammon (GNUbg) adapter reference:
 
-- `examples/gnubg-cli-vs-random.toml` and `examples/gnubg-cli-vs-pubeval.toml` use `gnubg_engine`, which adapts GNUbg's existing text CLI to UBGI.
+- `examples/gnubg-cli-vs-random.toml` and `examples/gnubg-cli-vs-pubeval.toml` use the built-in `gnubg-cli` adapter, which adapts GNUbg's existing text CLI to UBGI.
 - `https://www.gnu.org/software/gnubg/`

@@ -1,11 +1,20 @@
 use std::io::{self, BufRead, Write};
 
-use bgci::common::parse_variant_setoption;
+use crate::common::parse_variant_setoption;
 use bkgm::codecs::gnuid;
 use bkgm::dice::Dice;
-use bkgm::{Game, State, Variant, VariantPosition};
+use bkgm::{Game, Variant};
 
-fn main() {
+pub trait UbgiAdapter {
+    fn id_name(&self) -> &'static str;
+    fn id_version(&self) -> &'static str;
+    fn on_ready(&mut self) -> Result<(), String> {
+        Ok(())
+    }
+    fn choose_move(&mut self, game: &Game, dice: Dice) -> Result<String, String>;
+}
+
+pub fn run_ubgi_loop(adapter: &mut impl UbgiAdapter) {
     let stdin = io::stdin();
     let mut stdout = io::stdout();
     let mut variant = Variant::Backgammon;
@@ -22,9 +31,9 @@ fn main() {
         }
 
         if cmd == "ubgi" {
-            reply(&mut stdout, "id name pubeval_engine 0.1");
+            reply(&mut stdout, &format!("id name {}", adapter.id_name()));
             reply(&mut stdout, "id author bgci");
-            reply(&mut stdout, "id version 0.1");
+            reply(&mut stdout, &format!("id version {}", adapter.id_version()));
             reply(
                 &mut stdout,
                 "option name Variant type combo default backgammon var backgammon var nackgammon var longgammon var hypergammon var hypergammon2 var hypergammon4 var hypergammon5",
@@ -34,7 +43,10 @@ fn main() {
         }
 
         if cmd == "isready" {
-            reply(&mut stdout, "readyok");
+            match adapter.on_ready() {
+                Ok(()) => reply(&mut stdout, "readyok"),
+                Err(err) => reply(&mut stdout, &format!("error internal isready_failed {err}")),
+            }
             continue;
         }
 
@@ -106,18 +118,13 @@ fn main() {
                 );
                 continue;
             }
-
-            let mut best_idx = 0usize;
-            let mut best_value = evaluate_position(legal_moves[0].1);
-            for (idx, (_, pos)) in legal_moves.iter().enumerate().skip(1) {
-                let value = evaluate_position(*pos);
-                if value > best_value {
-                    best_value = value;
-                    best_idx = idx;
-                }
+            match adapter.choose_move(&game, current_dice) {
+                Ok(mv) => reply(&mut stdout, &format!("bestmove {mv}")),
+                Err(err) => reply(
+                    &mut stdout,
+                    &format!("error internal move_select_failed {err}"),
+                ),
             }
-            let mv = &legal_moves[best_idx].0;
-            reply(&mut stdout, &format!("bestmove {mv}"));
             continue;
         }
 
@@ -127,57 +134,6 @@ fn main() {
 
         reply(&mut stdout, "error unknown_command");
     }
-}
-
-fn evaluate_position(position: VariantPosition) -> f32 {
-    match position {
-        VariantPosition::Backgammon(p) => eval_state(p),
-        VariantPosition::Nackgammon(p) => eval_state(p),
-        VariantPosition::Longgammon(p) => eval_state(p),
-        VariantPosition::Hypergammon(p) => eval_state(p),
-        VariantPosition::Hypergammon2(p) => eval_state(p),
-        VariantPosition::Hypergammon4(p) => eval_state(p),
-        VariantPosition::Hypergammon5(p) => eval_state(p),
-    }
-}
-
-fn eval_state<S: State>(p: S) -> f32 {
-    let mut x_pips = 0f32;
-    let mut o_pips = 0f32;
-    let mut x_blots = 0f32;
-    let mut o_blots = 0f32;
-
-    for pip in 1..=24 {
-        let n = p.pip(pip);
-        if n > 0 {
-            x_pips += (n as f32) * pip as f32;
-            if n == 1 {
-                x_blots += 1.0;
-            }
-        } else if n < 0 {
-            o_pips += ((-n) as f32) * (25 - pip) as f32;
-            if n == -1 {
-                o_blots += 1.0;
-            }
-        }
-    }
-
-    x_pips += (p.x_bar() as f32) * 25.0;
-    o_pips += (p.o_bar() as f32) * 25.0;
-
-    let x_borne = p.x_off() as f32;
-    let o_borne = p.o_off() as f32;
-
-    let x_score = -x_pips + (x_borne * 22.0) - (x_blots * 2.0) - (p.x_bar() as f32) * 3.0;
-    let o_score = -o_pips + (o_borne * 22.0) - (o_blots * 2.0) - (p.o_bar() as f32) * 3.0;
-
-    let on_roll_value = if p.turn() {
-        x_score - o_score
-    } else {
-        o_score - x_score
-    };
-
-    (on_roll_value / 200.0).clamp(-3.0, 3.0)
 }
 
 fn reply(out: &mut impl Write, line: &str) {

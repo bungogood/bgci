@@ -1,11 +1,12 @@
 use std::fs::OpenOptions;
-use std::io::{self, BufRead, BufReader, Write};
+use std::io::{BufRead, BufReader, Write};
 use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
 
-use bgci::common::parse_variant_setoption;
 use bkgm::codecs::gnuid;
 use bkgm::dice::Dice;
-use bkgm::{Game, Variant};
+use bkgm::Game;
+
+use super::runtime::{run_ubgi_loop, UbgiAdapter};
 
 struct GnubgSession {
     child: Child,
@@ -100,195 +101,84 @@ impl GnubgSession {
     }
 }
 
-fn main() {
-    let stdin = io::stdin();
-    let mut stdout = io::stdout();
-    let mut variant = Variant::Backgammon;
-    let mut game = Game::new(variant);
-    let mut dice: Option<Dice> = None;
+pub fn run() {
+    let mut adapter = GnubgCliAdapter {
+        gnubg_bin: resolve_gnubg_bin(),
+        gnubg_pkgdatadir: resolve_gnubg_pkgdatadir(),
+        session: None,
+    };
+    run_ubgi_loop(&mut adapter);
+    if let Some(mut s) = adapter.session {
+        s.shutdown();
+    }
+}
 
-    let gnubg_bin = resolve_gnubg_bin();
-    let gnubg_pkgdatadir = resolve_gnubg_pkgdatadir();
+struct GnubgCliAdapter {
+    gnubg_bin: String,
+    gnubg_pkgdatadir: Option<String>,
+    session: Option<GnubgSession>,
+}
 
-    let mut session: Option<GnubgSession> = None;
-
-    for line in stdin.lock().lines() {
-        let Ok(line) = line else {
-            break;
-        };
-        let cmd = line.trim();
-        if cmd.is_empty() {
-            continue;
-        }
-
-        if cmd == "ubgi" {
-            reply(&mut stdout, "id name gnubg_engine 0.3");
-            reply(&mut stdout, "id author bgci");
-            reply(&mut stdout, "id version 0.3");
-            reply(
-                &mut stdout,
-                "option name Variant type combo default backgammon var backgammon var nackgammon var longgammon var hypergammon var hypergammon2 var hypergammon4 var hypergammon5",
-            );
-            reply(&mut stdout, "ubgiok");
-            continue;
-        }
-
-        if cmd == "isready" {
-            match ensure_session(&mut session, &gnubg_bin, gnubg_pkgdatadir.as_deref()) {
-                Ok(_) => reply(&mut stdout, "readyok"),
-                Err(err) => reply(
-                    &mut stdout,
-                    &format!("error internal gnubg_start_failed {err}"),
-                ),
-            }
-            continue;
-        }
-
-        if cmd == "newgame" {
-            game = Game::new(variant);
-            dice = None;
-            continue;
-        }
-
-        if let Some(parsed_variant) = parse_variant_setoption(cmd) {
-            match parsed_variant {
-                Ok(v) => {
-                    variant = v;
-                    game = Game::new(variant);
-                }
-                Err(_) => reply(&mut stdout, "error bad_argument variant"),
-            }
-            continue;
-        }
-
-        if let Some(id) = cmd.strip_prefix("position gnubgid ") {
-            match gnuid::decode(variant, id.trim()) {
-                Some(pos) => {
-                    let _ = game.set_position(pos);
-                }
-                None => reply(&mut stdout, "error bad_argument invalid_position"),
-            }
-            continue;
-        }
-
-        if cmd == "position xgid" || cmd.starts_with("position xgid ") {
-            reply(&mut stdout, "error unsupported_feature position_xgid");
-            continue;
-        }
-
-        if let Some(rest) = cmd.strip_prefix("dice ") {
-            let parts: Vec<&str> = rest.split_whitespace().collect();
-            if parts.len() != 2 {
-                reply(&mut stdout, "error bad_argument dice");
-                continue;
-            }
-            let d1 = parts[0].parse::<usize>();
-            let d2 = parts[1].parse::<usize>();
-            match (d1, d2) {
-                (Ok(a), Ok(b)) if (1..=6).contains(&a) && (1..=6).contains(&b) => {
-                    dice = Some(Dice::new(a, b));
-                }
-                _ => reply(&mut stdout, "error bad_argument dice"),
-            }
-            continue;
-        }
-
-        if cmd == "go" || cmd == "go role chequer" {
-            let Some(current_dice) = dice else {
-                reply(&mut stdout, "error missing_context dice");
-                continue;
-            };
-            let legal = game.legal_positions(&current_dice);
-            if legal.is_empty() {
-                reply(&mut stdout, "error missing_context legal_moves");
-                continue;
-            }
-            let legal_moves = match game.position().legal_moves(current_dice) {
-                Ok(moves) => moves,
-                Err(err) => {
-                    reply(&mut stdout, &format!("error internal move_encode {err}"));
-                    continue;
-                }
-            };
-
-            let session_ref =
-                match ensure_session(&mut session, &gnubg_bin, gnubg_pkgdatadir.as_deref()) {
-                    Ok(s) => s,
-                    Err(err) => {
-                        reply(
-                            &mut stdout,
-                            &format!("error internal gnubg_start_failed {err}"),
-                        );
-                        continue;
-                    }
-                };
-
-            let _ = current_dice;
-
-            let legal_ids: Vec<String> = legal.iter().map(|p| gnuid::encode(*p)).collect();
-            let encodable_ids: Vec<String> = legal_moves
-                .iter()
-                .map(|(_, pos)| gnuid::encode(*pos))
-                .collect();
-            if encodable_ids.is_empty() {
-                reply(
-                    &mut stdout,
-                    "error internal move_encode no_encodable_legal_moves",
-                );
-                continue;
-            }
-            let x_to_move = game.position().turn();
-            let child_x_to_move = !x_to_move;
-
-            let chosen_id =
-                match choose_best_legal_by_eval(session_ref, &encodable_ids, child_x_to_move) {
-                    Ok(id) => id,
-                    Err(err) => {
-                        reply(
-                            &mut stdout,
-                            &format!("error internal gnubg_eval_select_failed {err}"),
-                        );
-                        continue;
-                    }
-                };
-
-            let chosen_idx = match legal_ids.iter().position(|id| id == &chosen_id) {
-                Some(idx) => idx,
-                None => {
-                    reply(
-                        &mut stdout,
-                        "error internal gnubg_eval_select_failed selected_non_legal_child",
-                    );
-                    continue;
-                }
-            };
-            let chosen_pid = gnuid::encode(legal[chosen_idx]);
-            let mv = match legal_moves
-                .iter()
-                .find(|(_, pos)| gnuid::encode(*pos) == chosen_pid)
-            {
-                Some((mv, _)) => mv,
-                None => {
-                    reply(
-                        &mut stdout,
-                        "error internal move_encode selected_child_not_encodable",
-                    );
-                    continue;
-                }
-            };
-            reply(&mut stdout, &format!("bestmove {mv}"));
-            continue;
-        }
-
-        if cmd == "quit" {
-            break;
-        }
-
-        reply(&mut stdout, "error unknown_command");
+impl UbgiAdapter for GnubgCliAdapter {
+    fn id_name(&self) -> &'static str {
+        "gnubg_engine 0.3"
     }
 
-    if let Some(mut s) = session {
-        s.shutdown();
+    fn id_version(&self) -> &'static str {
+        "0.3"
+    }
+
+    fn on_ready(&mut self) -> Result<(), String> {
+        let _ = ensure_session(
+            &mut self.session,
+            &self.gnubg_bin,
+            self.gnubg_pkgdatadir.as_deref(),
+        )?;
+        Ok(())
+    }
+
+    fn choose_move(&mut self, game: &Game, dice: Dice) -> Result<String, String> {
+        let legal = game.legal_positions(&dice);
+        if legal.is_empty() {
+            return Err("missing_context legal_moves".to_string());
+        }
+        let legal_moves = game
+            .position()
+            .legal_moves(dice)
+            .map_err(|err| format!("move_encode {err}"))?;
+
+        let session_ref = ensure_session(
+            &mut self.session,
+            &self.gnubg_bin,
+            self.gnubg_pkgdatadir.as_deref(),
+        )
+        .map_err(|err| format!("gnubg_start_failed {err}"))?;
+
+        let legal_ids: Vec<String> = legal.iter().map(|p| gnuid::encode(*p)).collect();
+        let encodable_ids: Vec<String> = legal_moves
+            .iter()
+            .map(|(_, pos)| gnuid::encode(*pos))
+            .collect();
+        if encodable_ids.is_empty() {
+            return Err("move_encode no_encodable_legal_moves".to_string());
+        }
+        let x_to_move = game.position().turn();
+        let child_x_to_move = !x_to_move;
+
+        let chosen_id = choose_best_legal_by_eval(session_ref, &encodable_ids, child_x_to_move)
+            .map_err(|err| format!("gnubg_eval_select_failed {err}"))?;
+
+        let chosen_idx = legal_ids
+            .iter()
+            .position(|id| id == &chosen_id)
+            .ok_or_else(|| "gnubg_eval_select_failed selected_non_legal_child".to_string())?;
+        let chosen_pid = gnuid::encode(legal[chosen_idx]);
+        let mv = legal_moves
+            .iter()
+            .find(|(_, pos)| gnuid::encode(*pos) == chosen_pid)
+            .map(|(mv, _)| mv)
+            .ok_or_else(|| "move_encode selected_child_not_encodable".to_string())?;
+        Ok(mv.to_string())
     }
 }
 
@@ -408,11 +298,6 @@ fn parse_eval_equity(segment: &str) -> Option<f32> {
     }
 
     None
-}
-
-fn reply(out: &mut impl Write, line: &str) {
-    let _ = writeln!(out, "{line}");
-    let _ = out.flush();
 }
 
 fn resolve_gnubg_bin() -> String {
