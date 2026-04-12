@@ -24,6 +24,9 @@ Run a duel directly without a duel config file:
 
 ```bash
 cargo run -- duel --engine-a gnubg --engine-b pubeval --games 1000
+
+# parallel workers (one engine pair per worker)
+cargo run -- duel --engine-a gnubg --engine-b pubeval --games 1000 --parallel 8
 ```
 
 Run an engine protocol check directly from an alias:

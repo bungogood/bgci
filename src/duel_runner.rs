@@ -1,5 +1,7 @@
 use std::fs;
 use std::io::{BufWriter, Write};
+use std::sync::mpsc;
+use std::thread;
 use std::time::Instant;
 
 use bkgm::codecs::gnuid;
@@ -24,6 +26,18 @@ pub struct RunSummary {
     pub line_sides: String,
 }
 
+enum WorkerMessage {
+    Game(CompletedGame),
+    Error(String),
+    Done,
+}
+
+struct CompletedGame {
+    game_idx: usize,
+    a_is_x: bool,
+    result: DuelGameResult,
+}
+
 pub fn run_duel(
     cfg: &DuelConfig,
     variant: Variant,
@@ -44,15 +58,8 @@ pub fn run_duel(
     let trace_dir = paths.trace_games_dir.clone();
     fs::create_dir_all(&trace_dir).map_err(|e| e.to_string())?;
 
-    let mut engine_a = EngineProcess::spawn(&cfg.engine_a)?;
-    let mut engine_b = EngineProcess::spawn(&cfg.engine_b)?;
-    engine_a.init_ubgi()?;
-    engine_b.init_ubgi()?;
-    engine_a.set_variant(variant)?;
-    engine_b.set_variant(variant)?;
-
-    let mut dice_gen = FastrandDice::with_seed(cfg.seed);
     let mut stats = DuelStats::new();
+    let workers = cfg.parallel.max(1).min(cfg.games.max(1));
 
     let run_start = Instant::now();
     let mp = MultiProgress::new();
@@ -79,142 +86,170 @@ pub fn run_duel(
     let stats_sides = mp.add(ProgressBar::new_spinner());
     stats_sides.set_style(ProgressStyle::with_template("{msg}").map_err(|e| e.to_string())?);
 
-    for game_idx in 0..cfg.games {
-        let a_is_x = !(cfg.swap_sides && game_idx % 2 == 1);
-        engine_a.new_game()?;
-        engine_b.new_game()?;
+    let (tx, rx) = mpsc::channel::<WorkerMessage>();
+    let engine_a_cfg = cfg.engine_a.clone();
+    let engine_b_cfg = cfg.engine_b.clone();
+    let max_plies = cfg.max_plies;
+    let swap_sides = cfg.swap_sides;
+    let base_seed = cfg.seed;
+    let games = cfg.games;
 
-        let result = play_game(
-            variant,
-            cfg.max_plies,
-            &mut dice_gen,
-            &mut engine_a,
-            &mut engine_b,
-            a_is_x,
-        )?;
+    thread::scope(|scope| {
+        for worker_id in 0..workers {
+            let tx = tx.clone();
+            let engine_a_cfg = engine_a_cfg.clone();
+            let engine_b_cfg = engine_b_cfg.clone();
+            let worker_variant = variant;
+            scope.spawn(move || {
+                let mut engine_a = match EngineProcess::spawn(&engine_a_cfg) {
+                    Ok(e) => e,
+                    Err(err) => {
+                        let _ = tx.send(WorkerMessage::Error(format!(
+                            "worker {} failed to spawn engine A: {}",
+                            worker_id + 1,
+                            err
+                        )));
+                        let _ = tx.send(WorkerMessage::Done);
+                        return;
+                    }
+                };
+                let mut engine_b = match EngineProcess::spawn(&engine_b_cfg) {
+                    Ok(e) => e,
+                    Err(err) => {
+                        let _ = tx.send(WorkerMessage::Error(format!(
+                            "worker {} failed to spawn engine B: {}",
+                            worker_id + 1,
+                            err
+                        )));
+                        let _ = tx.send(WorkerMessage::Done);
+                        return;
+                    }
+                };
 
-        let trace_path = trace_dir.join(format!("game_{:05}.log", game_idx + 1));
-        let mut trace = String::new();
-        trace.push_str(&format!(
-            "game={} engine_x={} engine_o={} winner={} plies={}\n",
-            game_idx + 1,
-            if a_is_x {
-                &cfg.engine_a.name
-            } else {
-                &cfg.engine_b.name
-            },
-            if a_is_x {
-                &cfg.engine_b.name
-            } else {
-                &cfg.engine_a.name
-            },
-            match result.winner_x {
-                Some(true) => "x",
-                Some(false) => "o",
-                None => "incomplete",
-            },
-            result.plies,
-        ));
-        for line in &result.trace_lines {
-            trace.push_str(line);
-            trace.push('\n');
+                let init_result = (|| -> Result<(), String> {
+                    engine_a.init_ubgi()?;
+                    engine_b.init_ubgi()?;
+                    engine_a.set_variant(worker_variant)?;
+                    engine_b.set_variant(worker_variant)?;
+                    Ok(())
+                })();
+
+                if let Err(err) = init_result {
+                    let _ = tx.send(WorkerMessage::Error(format!(
+                        "worker {} engine init failed: {}",
+                        worker_id + 1,
+                        err
+                    )));
+                    engine_a.quit();
+                    engine_b.quit();
+                    let _ = tx.send(WorkerMessage::Done);
+                    return;
+                }
+
+                for game_idx in (worker_id..games).step_by(workers) {
+                    let a_is_x = !(swap_sides && game_idx % 2 == 1);
+                    if let Err(err) = engine_a.new_game() {
+                        let _ = tx.send(WorkerMessage::Error(format!(
+                            "worker {} game {} new_game(A) failed: {}",
+                            worker_id + 1,
+                            game_idx + 1,
+                            err
+                        )));
+                        break;
+                    }
+                    if let Err(err) = engine_b.new_game() {
+                        let _ = tx.send(WorkerMessage::Error(format!(
+                            "worker {} game {} new_game(B) failed: {}",
+                            worker_id + 1,
+                            game_idx + 1,
+                            err
+                        )));
+                        break;
+                    }
+
+                    let mut dice_gen = FastrandDice::with_seed(seed_for_game(base_seed, game_idx));
+                    match play_game(
+                        worker_variant,
+                        max_plies,
+                        &mut dice_gen,
+                        &mut engine_a,
+                        &mut engine_b,
+                        a_is_x,
+                    ) {
+                        Ok(result) => {
+                            let _ = tx.send(WorkerMessage::Game(CompletedGame {
+                                game_idx,
+                                a_is_x,
+                                result,
+                            }));
+                        }
+                        Err(err) => {
+                            let _ = tx.send(WorkerMessage::Error(format!(
+                                "worker {} game {} failed: {}",
+                                worker_id + 1,
+                                game_idx + 1,
+                                err
+                            )));
+                            break;
+                        }
+                    }
+                }
+
+                engine_a.quit();
+                engine_b.quit();
+                let _ = tx.send(WorkerMessage::Done);
+            });
         }
-        fs::write(trace_path, trace).map_err(|e| e.to_string())?;
+        drop(tx);
 
-        debug!(
-            game = game_idx + 1,
-            winner_x = ?result.winner_x,
-            points_x = result.points_x,
-            points_o = result.points_o,
-            plies = result.plies,
-            "game complete"
-        );
+        let mut done_workers = 0usize;
+        let mut done_games = 0usize;
+        let mut run_error: Option<String> = None;
 
-        let winner_name = match result.winner_x {
-            Some(true) => {
-                if a_is_x {
-                    &cfg.engine_a.name
-                } else {
-                    &cfg.engine_b.name
+        while done_workers < workers {
+            let msg = match rx.recv() {
+                Ok(msg) => msg,
+                Err(_) => break,
+            };
+            match msg {
+                WorkerMessage::Done => {
+                    done_workers += 1;
+                }
+                WorkerMessage::Error(err) => {
+                    if run_error.is_none() {
+                        run_error = Some(err);
+                    }
+                }
+                WorkerMessage::Game(done) => {
+                    done_games += 1;
+                    if run_error.is_none() {
+                        process_completed_game(
+                            &done,
+                            cfg,
+                            &trace_dir,
+                            &mut csv,
+                            &mut stats,
+                            run_start,
+                            &progress,
+                            &stats_engines,
+                            &stats_result,
+                            &stats_rate,
+                            &stats_decide,
+                            &stats_class,
+                            &stats_sides,
+                            done_games,
+                        )?;
+                    }
                 }
             }
-            Some(false) => {
-                if a_is_x {
-                    &cfg.engine_b.name
-                } else {
-                    &cfg.engine_a.name
-                }
-            }
-            None => "incomplete",
-        };
+        }
 
-        let (a_game_points, b_game_points) = stats.record_game(&GameUpdate {
-            a_is_x,
-            winner_x: result.winner_x,
-            points_x: result.points_x,
-            points_o: result.points_o,
-            plies: result.plies,
-            a_decisions: result.a_decisions,
-            b_decisions: result.b_decisions,
-            a_decision_sec: result.a_decision_sec,
-            b_decision_sec: result.b_decision_sec,
-        });
+        if let Some(err) = run_error {
+            return Err(err);
+        }
 
-        let engine_x = if a_is_x {
-            &cfg.engine_a.name
-        } else {
-            &cfg.engine_b.name
-        };
-        let engine_o = if a_is_x {
-            &cfg.engine_b.name
-        } else {
-            &cfg.engine_a.name
-        };
-        let outcome = if result.winner_x.is_none() {
-            "incomplete"
-        } else {
-            match result.points_x.abs().round() as i32 {
-                3 => "backgammon",
-                2 => "gammon",
-                1 => "normal",
-                _ => "unknown",
-            }
-        };
-
-        writeln!(
-            csv,
-            "{},{},{},{},{},{:.1},{:.1},{:.1},{:.1},{}",
-            game_idx + 1,
-            engine_x,
-            engine_o,
-            winner_name,
-            outcome,
-            result.points_x,
-            result.points_o,
-            a_game_points,
-            b_game_points,
-            result.plies
-        )
-        .map_err(|e| e.to_string())?;
-        csv.flush().map_err(|e| e.to_string())?;
-
-        let done = game_idx + 1;
-        let elapsed = run_start.elapsed();
-        let (line_engines, line_result, line_rate, line_decide, line_class, line_sides) =
-            render_status_lines(stats.status_view(
-                &cfg.engine_a.name,
-                &cfg.engine_b.name,
-                done,
-                elapsed,
-            ));
-        progress.set_position(done as u64);
-        stats_engines.set_message(line_engines);
-        stats_result.set_message(line_result);
-        stats_rate.set_message(line_rate);
-        stats_decide.set_message(line_decide);
-        stats_class.set_message(line_class);
-        stats_sides.set_message(line_sides);
-    }
+        Ok(())
+    })?;
 
     progress.finish_and_clear();
     stats_engines.finish_and_clear();
@@ -223,9 +258,6 @@ pub fn run_duel(
     stats_decide.finish_and_clear();
     stats_class.finish_and_clear();
     stats_sides.finish_and_clear();
-
-    engine_a.quit();
-    engine_b.quit();
 
     let elapsed = run_start.elapsed();
     let (line_engines, line_result, line_rate, line_decide, line_class, line_sides) =
@@ -256,6 +288,158 @@ struct DuelGameResult {
     a_decision_sec: f64,
     b_decision_sec: f64,
     trace_lines: Vec<String>,
+}
+
+#[allow(clippy::too_many_arguments)]
+fn process_completed_game(
+    done: &CompletedGame,
+    cfg: &DuelConfig,
+    trace_dir: &std::path::Path,
+    csv: &mut BufWriter<fs::File>,
+    stats: &mut DuelStats,
+    run_start: Instant,
+    progress: &ProgressBar,
+    stats_engines: &ProgressBar,
+    stats_result: &ProgressBar,
+    stats_rate: &ProgressBar,
+    stats_decide: &ProgressBar,
+    stats_class: &ProgressBar,
+    stats_sides: &ProgressBar,
+    done_games: usize,
+) -> Result<(), String> {
+    let game_idx = done.game_idx;
+    let a_is_x = done.a_is_x;
+    let result = &done.result;
+
+    let trace_path = trace_dir.join(format!("game_{:05}.log", game_idx + 1));
+    let mut trace = String::new();
+    trace.push_str(&format!(
+        "game={} engine_x={} engine_o={} winner={} plies={}\n",
+        game_idx + 1,
+        if a_is_x {
+            &cfg.engine_a.name
+        } else {
+            &cfg.engine_b.name
+        },
+        if a_is_x {
+            &cfg.engine_b.name
+        } else {
+            &cfg.engine_a.name
+        },
+        match result.winner_x {
+            Some(true) => "x",
+            Some(false) => "o",
+            None => "incomplete",
+        },
+        result.plies,
+    ));
+    for line in &result.trace_lines {
+        trace.push_str(line);
+        trace.push('\n');
+    }
+    fs::write(trace_path, trace).map_err(|e| e.to_string())?;
+
+    debug!(
+        game = game_idx + 1,
+        winner_x = ?result.winner_x,
+        points_x = result.points_x,
+        points_o = result.points_o,
+        plies = result.plies,
+        "game complete"
+    );
+
+    let winner_name = match result.winner_x {
+        Some(true) => {
+            if a_is_x {
+                &cfg.engine_a.name
+            } else {
+                &cfg.engine_b.name
+            }
+        }
+        Some(false) => {
+            if a_is_x {
+                &cfg.engine_b.name
+            } else {
+                &cfg.engine_a.name
+            }
+        }
+        None => "incomplete",
+    };
+
+    let (a_game_points, b_game_points) = stats.record_game(&GameUpdate {
+        a_is_x,
+        winner_x: result.winner_x,
+        points_x: result.points_x,
+        points_o: result.points_o,
+        plies: result.plies,
+        a_decisions: result.a_decisions,
+        b_decisions: result.b_decisions,
+        a_decision_sec: result.a_decision_sec,
+        b_decision_sec: result.b_decision_sec,
+    });
+
+    let engine_x = if a_is_x {
+        &cfg.engine_a.name
+    } else {
+        &cfg.engine_b.name
+    };
+    let engine_o = if a_is_x {
+        &cfg.engine_b.name
+    } else {
+        &cfg.engine_a.name
+    };
+    let outcome = if result.winner_x.is_none() {
+        "incomplete"
+    } else {
+        match result.points_x.abs().round() as i32 {
+            3 => "backgammon",
+            2 => "gammon",
+            1 => "normal",
+            _ => "unknown",
+        }
+    };
+
+    writeln!(
+        csv,
+        "{},{},{},{},{},{:.1},{:.1},{:.1},{:.1},{}",
+        game_idx + 1,
+        engine_x,
+        engine_o,
+        winner_name,
+        outcome,
+        result.points_x,
+        result.points_o,
+        a_game_points,
+        b_game_points,
+        result.plies
+    )
+    .map_err(|e| e.to_string())?;
+    csv.flush().map_err(|e| e.to_string())?;
+
+    let elapsed = run_start.elapsed();
+    let (line_engines, line_result, line_rate, line_decide, line_class, line_sides) =
+        render_status_lines(stats.status_view(
+            &cfg.engine_a.name,
+            &cfg.engine_b.name,
+            done_games,
+            elapsed,
+        ));
+    progress.set_position(done_games as u64);
+    stats_engines.set_message(line_engines);
+    stats_result.set_message(line_result);
+    stats_rate.set_message(line_rate);
+    stats_decide.set_message(line_decide);
+    stats_class.set_message(line_class);
+    stats_sides.set_message(line_sides);
+
+    Ok(())
+}
+
+fn seed_for_game(base_seed: u64, game_idx: usize) -> u64 {
+    let mut z = base_seed.wrapping_add((game_idx as u64).wrapping_mul(0x9E3779B97F4A7C15));
+    z = (z ^ (z >> 30)).wrapping_mul(0xBF58476D1CE4E5B9);
+    z = (z ^ (z >> 27)).wrapping_mul(0x94D049BB133111EB);
+    z ^ (z >> 31)
 }
 
 fn play_game(

@@ -10,6 +10,7 @@ use serde::Deserialize;
 #[serde(default)]
 pub struct DuelConfig {
     pub games: usize,
+    pub parallel: usize,
     pub seed: u64,
     pub max_plies: usize,
     pub swap_sides: bool,
@@ -23,6 +24,7 @@ impl Default for DuelConfig {
     fn default() -> Self {
         Self {
             games: 20,
+            parallel: 1,
             seed: 42,
             max_plies: 512,
             swap_sides: true,

@@ -20,6 +20,9 @@ pub struct DuelArgs {
 
     #[arg(long)]
     games: Option<usize>,
+
+    #[arg(long)]
+    parallel: Option<usize>,
 }
 
 pub fn run(args: DuelArgs) -> Result<(), String> {
@@ -36,6 +39,7 @@ pub fn run(args: DuelArgs) -> Result<(), String> {
         log_path = %run_paths.log_file.display(),
         output_csv = %run_paths.output_csv.display(),
         games = cfg.games,
+        parallel = cfg.parallel,
         seed = cfg.seed,
         max_plies = cfg.max_plies,
         variant = %cfg.variant,
@@ -68,6 +72,9 @@ fn build_duel_config(args: DuelArgs) -> Result<DuelConfig, String> {
         if let Some(games) = args.games {
             cfg.games = games;
         }
+        if let Some(parallel) = args.parallel {
+            cfg.parallel = parallel.max(1);
+        }
         return Ok(cfg);
     }
 
@@ -97,6 +104,9 @@ fn build_duel_config(args: DuelArgs) -> Result<DuelConfig, String> {
     };
     if let Some(games) = args.games {
         cfg.games = games;
+    }
+    if let Some(parallel) = args.parallel {
+        cfg.parallel = parallel.max(1);
     }
     Ok(cfg)
 }
