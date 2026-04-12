@@ -11,20 +11,20 @@ UBGI is inspired by the chess Universal Chess Interface (UCI) and defines a simp
 `--config` is required. Run baseline example:
 
 ```bash
-cargo run -- --config config/pubeval-vs-random.toml
+cargo run -- --config examples/pubeval-vs-random.toml
 ```
 
 Run GNUbg adapter vs random:
 
 ```bash
-cargo run -- --config config/gnubg-cli-vs-random.toml
+cargo run -- --config examples/gnubg-cli-vs-random.toml
 ```
 
 ## Public Duel Configs
 
-- `config/pubeval-vs-random.toml` (baseline example)
-- `config/gnubg-cli-vs-random.toml`
-- `config/gnubg-cli-vs-pubeval.toml`
+- `examples/pubeval-vs-random.toml` (baseline example)
+- `examples/gnubg-cli-vs-random.toml`
+- `examples/gnubg-cli-vs-pubeval.toml`
 
 ## Logging
 
@@ -42,7 +42,7 @@ Results and logs are derived from datetime and engine names.
 
 ## Local/Private Configs
 
-Put private configs under `config/local/` (gitignored).
+`config/` is gitignored. Copy any file from `examples/` into `config/` and edit locally.
 
 ## Docs
 
@@ -50,5 +50,5 @@ See `docs/ubgi-v0.1-spec.md`.
 
 GNU Backgammon (GNUbg) adapter reference:
 
-- `config/gnubg-cli-vs-random.toml` and `config/gnubg-cli-vs-pubeval.toml` use `gnubg_engine`, which adapts GNUbg's existing text CLI to UBGI.
+- `examples/gnubg-cli-vs-random.toml` and `examples/gnubg-cli-vs-pubeval.toml` use `gnubg_engine`, which adapts GNUbg's existing text CLI to UBGI.
 - `https://www.gnu.org/software/gnubg/`
