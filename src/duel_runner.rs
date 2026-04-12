@@ -2,9 +2,10 @@ use std::fs;
 use std::io::{BufWriter, Write};
 use std::time::Instant;
 
+use bkgm::codecs::gnuid;
 use bkgm::dice::Dice;
 use bkgm::dice_gen::{DiceGen, FastrandDice};
-use bkgm::{Game, GameState, Variant, VariantPosition};
+use bkgm::{normalize_move_text, Game, GameState, Variant};
 use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
 use tracing::debug;
 
@@ -292,28 +293,26 @@ fn play_game(
                 trace_lines,
             });
         }
-        let legal_ids: Vec<String> = legal.iter().map(|p| p.position_id()).collect();
-        let position_id = game.position().position_id();
+        let legal_ids: Vec<String> = legal.iter().map(|p| gnuid::encode(*p)).collect();
+        let position_id = gnuid::encode(game.position());
         let x_to_move = game.position().turn();
         let a_to_move = x_to_move == a_is_x;
 
         let decision_start = Instant::now();
-        let chosen_id_raw = if a_to_move {
-            let picked = engine_a.choose_move_id(&position_id, dice, x_to_move)?;
+        let chosen_move_raw = if a_to_move {
+            let picked = engine_a.choose_move(&position_id, dice, x_to_move)?;
             a_decisions += 1;
             a_decision_sec += decision_start.elapsed().as_secs_f64();
             picked
         } else {
-            let picked = engine_b.choose_move_id(&position_id, dice, x_to_move)?;
+            let picked = engine_b.choose_move(&position_id, dice, x_to_move)?;
             b_decisions += 1;
             b_decision_sec += decision_start.elapsed().as_secs_f64();
             picked
         };
 
-        let chosen_id = variant
-            .from_position_id(&chosen_id_raw)
-            .map(|p| p.position_id())
-            .unwrap_or(chosen_id_raw.clone());
+        let chosen_move = normalize_move_text(&chosen_move_raw)
+            .ok_or_else(|| format!("engine returned invalid move text: {chosen_move_raw}"))?;
 
         let (d1, d2) = match dice {
             Dice::Double(d) => (d, d),
@@ -327,17 +326,17 @@ fn play_game(
             d1,
             d2,
             position_id,
-            chosen_id,
+            chosen_move,
             legal.len(),
         ));
-        if chosen_id != chosen_id_raw {
+        if chosen_move != chosen_move_raw {
             trace_lines.push(format!(
                 "choice_raw={} choice_canonical={}",
-                chosen_id_raw, chosen_id
+                chosen_move_raw, chosen_move
             ));
         }
 
-        let next = match choose_legal_from_id(&legal, &legal_ids, &chosen_id) {
+        let next = match game.position().apply_move(dice, &chosen_move) {
             Some(pos) => pos,
             None => {
                 let preview = legal_ids
@@ -347,18 +346,33 @@ fn play_game(
                     .collect::<Vec<_>>()
                     .join(",");
                 return Err(format!(
-                    "engine returned illegal move id: turn={} pos={} dice={}/{} choice_raw={} choice={} legal_count={} legal_preview={}",
+                    "engine returned illegal move: turn={} pos={} dice={}/{} choice_raw={} choice={} legal_count={} legal_preview={}",
                     if a_to_move { "A" } else { "B" },
                     position_id,
                     d1,
                     d2,
-                    chosen_id_raw,
-                    chosen_id,
+                    chosen_move_raw,
+                    chosen_move,
                     legal_ids.len(),
                     preview,
                 ));
             }
         };
+
+        if !legal
+            .iter()
+            .any(|candidate| gnuid::encode(*candidate) == gnuid::encode(next))
+        {
+            return Err(format!(
+                "engine returned move not in legal children: turn={} pos={} dice={}/{} choice_raw={} choice={}",
+                if a_to_move { "A" } else { "B" },
+                position_id,
+                d1,
+                d2,
+                chosen_move_raw,
+                chosen_move,
+            ));
+        }
 
         game.set_position(next)
             .map_err(|e| format!("failed to set position: {e}"))?;
@@ -396,15 +410,4 @@ fn play_game(
         b_decision_sec,
         trace_lines,
     })
-}
-
-fn choose_legal_from_id(
-    legal: &[VariantPosition],
-    legal_ids: &[String],
-    id: &str,
-) -> Option<VariantPosition> {
-    legal_ids
-        .iter()
-        .position(|candidate| candidate == id)
-        .map(|idx| legal[idx])
 }

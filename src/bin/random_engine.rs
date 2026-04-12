@@ -1,9 +1,10 @@
 use std::io::{self, BufRead, Write};
 
 use bgci::common::parse_variant_setoption;
+use bkgm::codecs::gnuid;
 use bkgm::dice::Dice;
 use bkgm::dice_gen::{DiceGen, FastrandDice};
-use bkgm::{Game, Variant, VariantPosition};
+use bkgm::{Game, Variant};
 
 fn main() {
     let stdin = io::stdin();
@@ -57,7 +58,7 @@ fn main() {
         }
 
         if let Some(id) = cmd.strip_prefix("position gnubgid ") {
-            match variant.from_position_id(id.trim()) {
+            match gnuid::decode(variant, id.trim()) {
                 Some(pos) => {
                     let _ = game.set_position(pos);
                 }
@@ -93,14 +94,23 @@ fn main() {
                 reply(&mut stdout, "error missing_context dice");
                 continue;
             };
-            let legal = game.legal_positions(&current_dice);
-            if legal.is_empty() {
-                reply(&mut stdout, "error missing_context legal_moves");
+            let legal_moves = match game.position().legal_moves(current_dice) {
+                Ok(moves) => moves,
+                Err(err) => {
+                    reply(&mut stdout, &format!("error internal move_encode {err}"));
+                    continue;
+                }
+            };
+            if legal_moves.is_empty() {
+                reply(
+                    &mut stdout,
+                    "error internal move_encode no_encodable_legal_moves",
+                );
                 continue;
             }
-            let index = rng.choose_index(&vec![1.0; legal.len()]);
-            let chosen: VariantPosition = legal[index];
-            reply(&mut stdout, &format!("bestmoveid {}", chosen.position_id()));
+            let index = rng.choose_index(&vec![1.0; legal_moves.len()]);
+            let mv = &legal_moves[index].0;
+            reply(&mut stdout, &format!("bestmove {mv}"));
             continue;
         }
 

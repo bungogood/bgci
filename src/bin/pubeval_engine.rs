@@ -1,6 +1,7 @@
 use std::io::{self, BufRead, Write};
 
 use bgci::common::parse_variant_setoption;
+use bkgm::codecs::gnuid;
 use bkgm::dice::Dice;
 use bkgm::{Game, State, Variant, VariantPosition};
 
@@ -55,7 +56,7 @@ fn main() {
         }
 
         if let Some(id) = cmd.strip_prefix("position gnubgid ") {
-            match variant.from_position_id(id.trim()) {
+            match gnuid::decode(variant, id.trim()) {
                 Some(pos) => {
                     let _ = game.set_position(pos);
                 }
@@ -91,23 +92,32 @@ fn main() {
                 reply(&mut stdout, "error missing_context dice");
                 continue;
             };
-            let legal = game.legal_positions(&current_dice);
-            if legal.is_empty() {
-                reply(&mut stdout, "error missing_context legal_moves");
+            let legal_moves = match game.position().legal_moves(current_dice) {
+                Ok(moves) => moves,
+                Err(err) => {
+                    reply(&mut stdout, &format!("error internal move_encode {err}"));
+                    continue;
+                }
+            };
+            if legal_moves.is_empty() {
+                reply(
+                    &mut stdout,
+                    "error internal move_encode no_encodable_legal_moves",
+                );
                 continue;
             }
 
             let mut best_idx = 0usize;
-            let mut best_value = evaluate_position(legal[0]);
-            for (idx, pos) in legal.iter().enumerate().skip(1) {
+            let mut best_value = evaluate_position(legal_moves[0].1);
+            for (idx, (_, pos)) in legal_moves.iter().enumerate().skip(1) {
                 let value = evaluate_position(*pos);
                 if value > best_value {
                     best_value = value;
                     best_idx = idx;
                 }
             }
-            let chosen: VariantPosition = legal[best_idx];
-            reply(&mut stdout, &format!("bestmoveid {}", chosen.position_id()));
+            let mv = &legal_moves[best_idx].0;
+            reply(&mut stdout, &format!("bestmove {mv}"));
             continue;
         }
 

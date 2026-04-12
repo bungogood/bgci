@@ -3,6 +3,7 @@ use std::io::{self, BufRead, BufReader, Write};
 use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
 
 use bgci::common::parse_variant_setoption;
+use bkgm::codecs::gnuid;
 use bkgm::dice::Dice;
 use bkgm::{Game, Variant};
 
@@ -161,7 +162,7 @@ fn main() {
         }
 
         if let Some(id) = cmd.strip_prefix("position gnubgid ") {
-            match variant.from_position_id(id.trim()) {
+            match gnuid::decode(variant, id.trim()) {
                 Some(pos) => {
                     let _ = game.set_position(pos);
                 }
@@ -202,6 +203,13 @@ fn main() {
                 reply(&mut stdout, "error missing_context legal_moves");
                 continue;
             }
+            let legal_moves = match game.position().legal_moves(current_dice) {
+                Ok(moves) => moves,
+                Err(err) => {
+                    reply(&mut stdout, &format!("error internal move_encode {err}"));
+                    continue;
+                }
+            };
 
             let session_ref =
                 match ensure_session(&mut session, &gnubg_bin, gnubg_pkgdatadir.as_deref()) {
@@ -217,12 +225,23 @@ fn main() {
 
             let _ = current_dice;
 
-            let legal_ids: Vec<String> = legal.iter().map(|p| p.position_id()).collect();
+            let legal_ids: Vec<String> = legal.iter().map(|p| gnuid::encode(*p)).collect();
+            let encodable_ids: Vec<String> = legal_moves
+                .iter()
+                .map(|(_, pos)| gnuid::encode(*pos))
+                .collect();
+            if encodable_ids.is_empty() {
+                reply(
+                    &mut stdout,
+                    "error internal move_encode no_encodable_legal_moves",
+                );
+                continue;
+            }
             let x_to_move = game.position().turn();
             let child_x_to_move = !x_to_move;
 
             let chosen_id =
-                match choose_best_legal_by_eval(session_ref, &legal_ids, child_x_to_move) {
+                match choose_best_legal_by_eval(session_ref, &encodable_ids, child_x_to_move) {
                     Ok(id) => id,
                     Err(err) => {
                         reply(
@@ -233,7 +252,31 @@ fn main() {
                     }
                 };
 
-            reply(&mut stdout, &format!("bestmoveid {chosen_id}"));
+            let chosen_idx = match legal_ids.iter().position(|id| id == &chosen_id) {
+                Some(idx) => idx,
+                None => {
+                    reply(
+                        &mut stdout,
+                        "error internal gnubg_eval_select_failed selected_non_legal_child",
+                    );
+                    continue;
+                }
+            };
+            let chosen_pid = gnuid::encode(legal[chosen_idx]);
+            let mv = match legal_moves
+                .iter()
+                .find(|(_, pos)| gnuid::encode(*pos) == chosen_pid)
+            {
+                Some((mv, _)) => mv,
+                None => {
+                    reply(
+                        &mut stdout,
+                        "error internal move_encode selected_child_not_encodable",
+                    );
+                    continue;
+                }
+            };
+            reply(&mut stdout, &format!("bestmove {mv}"));
             continue;
         }
 
@@ -383,6 +426,24 @@ fn resolve_gnubg_pkgdatadir() -> Option<String> {
     if let Ok(dir) = std::env::var("BGCI_GNUBG_PKGDATADIR") {
         return Some(dir);
     }
+
+    let candidate = std::env::var("XDG_DATA_HOME")
+        .ok()
+        .map(|home| format!("{home}/gnubg"))
+        .or_else(|| {
+            std::env::var("HOME")
+                .ok()
+                .map(|home| format!("{home}/.local/share/gnubg"))
+        });
+
+    if let Some(dir) = candidate {
+        let weights = std::path::Path::new(&dir).join("gnubg.weights");
+        let wd = std::path::Path::new(&dir).join("gnubg.wd");
+        if weights.exists() || wd.exists() {
+            return Some(dir);
+        }
+    }
+
     None
 }
 

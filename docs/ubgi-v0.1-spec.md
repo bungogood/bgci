@@ -104,9 +104,8 @@ Suggested keys: `role`, `time_ms`, `nodes`, `nps`, `depth`, `eq`, `mwc`, `pwin`,
 ### Final Answers
 
 - `bestmove <payload>`
-- `bestmoveid <GNU_POSITION_ID>` (recommended extension for duellers)
 - `bestcube <double|nodouble>`
-- `bestturn cube=<double|nodouble> moveid=<GNU_POSITION_ID>`
+- `bestturn cube=<double|nodouble> move=<payload>`
 - optional: `eval eq <f> mwc <f> pwin <f> pgammon <f> pbg <f>`
 
 ### Errors
@@ -123,19 +122,14 @@ Suggested codes:
 
 ## 6. Move Representation
 
-UBGI v0.1 supports two payload styles to keep both GUI and dueller workflows practical.
+UBGI v0.1 uses a single move-text payload style for checker play.
 
 ### 6.1 `bestmove` (core)
 
 - For GUI-facing compatibility, engines should provide `bestmove`.
 - Preferred text shape is space-separated `from/to` tokens (example: `24/18 13/12`).
-
-### 6.2 `bestmoveid` (dueller extension)
-
-- For deterministic harness validation, engines may provide `bestmoveid <gnubgid>`.
-- Duellers can match this directly against legal child positions.
-
-If both are present, they must represent the same action.
+- Bar should be represented as `bar`; bear-off as `off` (FIBS-style notation).
+- Duellers should validate `bestmove` by matching against legal children generated from current position and dice.
 
 ## 7. Determinism and Benchmarking
 
@@ -153,7 +147,7 @@ For reproducible duels, GUI/dueller should:
 
 ### Level 1 (dueller-ready)
 
-- Level 0 plus cube actions, deterministic options, and `bestmoveid`
+- Level 0 plus cube actions and deterministic options
 
 ### Level 2 (analysis-friendly)
 

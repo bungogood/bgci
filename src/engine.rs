@@ -124,7 +124,7 @@ impl EngineProcess {
         }
     }
 
-    pub fn choose_move_id(
+    pub fn choose_move(
         &mut self,
         position_id: &str,
         dice: Dice,
@@ -140,13 +140,13 @@ impl EngineProcess {
         self.send("go role chequer")?;
         loop {
             let line = self.read_line()?;
-            if let Some(id) = line.strip_prefix("bestmoveid ") {
-                info!(choice = %id.trim(), "engine chose move");
-                return Ok(id.trim().to_string());
+            if let Some(mv) = line.strip_prefix("bestmove ") {
+                info!(choice = %mv.trim(), "engine chose move");
+                return Ok(mv.trim().to_string());
             }
-            if line.starts_with("bestmove ") {
-                error!(response = %line, "protocol error: expected bestmoveid");
-                return Err("engine returned bestmove; expected bestmoveid".to_string());
+            if line.starts_with("best") {
+                error!(response = %line, "protocol error: expected bestmove payload");
+                return Err(format!("engine returned unexpected best* response: {line}"));
             }
             if line.starts_with("error ") {
                 if line.starts_with("error unknown_command") {
@@ -160,6 +160,14 @@ impl EngineProcess {
 
     pub fn quit(&mut self) {
         let _ = self.send("quit");
+    }
+
+    pub fn send_command(&mut self, command: &str) -> Result<(), String> {
+        self.send(command)
+    }
+
+    pub fn read_response(&mut self) -> Result<String, String> {
+        self.read_line()
     }
 
     fn send(&mut self, command: &str) -> Result<(), String> {
