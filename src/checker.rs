@@ -16,6 +16,9 @@ pub struct CheckReport {
     pub bestmove_raw: Option<String>,
     pub bestmove_canonical: Option<String>,
     pub legal_preview: Vec<String>,
+    pub bar_notation_ok: bool,
+    pub off_notation_ok: bool,
+    pub numeric_bar_off_alias_seen: bool,
     pub errors: Vec<String>,
 }
 
@@ -42,6 +45,9 @@ pub fn run_check(engine_cfg: &EngineConfig, variant: Variant) -> Result<CheckRep
         bestmove_raw: None,
         bestmove_canonical: None,
         legal_preview: Vec::new(),
+        bar_notation_ok: false,
+        off_notation_ok: false,
+        numeric_bar_off_alias_seen: false,
         errors: Vec::new(),
     };
 
@@ -132,8 +138,156 @@ pub fn run_check(engine_cfg: &EngineConfig, variant: Variant) -> Result<CheckRep
         }
     }
 
+    apply_notation_probe(
+        &mut report,
+        &mut engine,
+        variant,
+        "Np7BQSCYZ/AAWA",
+        Dice::new(5, 3),
+        "bar-notation probe",
+        "bar",
+    );
+    apply_notation_probe(
+        &mut report,
+        &mut engine,
+        variant,
+        "/z0AADDeaxsAAA",
+        Dice::new(5, 5),
+        "off-notation probe",
+        "off",
+    );
+
     engine.quit();
     Ok(report)
+}
+
+fn probe_move_notation(
+    engine: &mut EngineProcess,
+    variant: Variant,
+    position_id: &str,
+    dice: Dice,
+    phase: &str,
+    errors: &mut Vec<String>,
+) -> Option<String> {
+    let Some(position) = gnuid::decode(variant, position_id) else {
+        errors.push(format!(
+            "{phase}: invalid probe position id '{position_id}'"
+        ));
+        return None;
+    };
+
+    let mut game = Game::new(variant);
+    if let Err(err) = game.set_position(position) {
+        errors.push(format!("{phase}: failed to set probe position: {err}"));
+        return None;
+    }
+    let legal = match game.position().legal_moves(dice) {
+        Ok(moves) => moves,
+        Err(err) => {
+            errors.push(format!("{phase}: failed to derive legal moves: {err}"));
+            return None;
+        }
+    };
+    if legal.is_empty() {
+        errors.push(format!("{phase}: probe has no legal moves"));
+        return None;
+    }
+
+    if let Err(err) = engine.send_command(&format!("position gnubgid {position_id}")) {
+        errors.push(format!("{phase}: {err}"));
+        return None;
+    }
+    let (d1, d2) = match dice {
+        Dice::Double(d) => (d, d),
+        Dice::Mixed(m) => (m.big(), m.small()),
+    };
+    if let Err(err) = engine.send_command(&format!("dice {d1} {d2}")) {
+        errors.push(format!("{phase}: {err}"));
+        return None;
+    }
+    if let Err(err) = engine.send_command("go role chequer") {
+        errors.push(format!("{phase}: {err}"));
+        return None;
+    }
+
+    loop {
+        match engine.read_response() {
+            Ok(line) => {
+                if let Some(mv) = line.strip_prefix("bestmove ") {
+                    return Some(mv.trim().to_string());
+                }
+                if line.starts_with("best") {
+                    errors.push(format!("{phase}: expected bestmove payload, got '{line}'"));
+                    return None;
+                }
+                if line.starts_with("error ") {
+                    errors.push(format!("{phase}: {line}"));
+                    return None;
+                }
+            }
+            Err(err) => {
+                errors.push(format!("{phase}: {err}"));
+                return None;
+            }
+        }
+    }
+}
+
+fn apply_notation_probe(
+    report: &mut CheckReport,
+    engine: &mut EngineProcess,
+    variant: Variant,
+    position_id: &str,
+    dice: Dice,
+    phase: &str,
+    expected_token: &str,
+) {
+    let probed = probe_move_notation(
+        engine,
+        variant,
+        position_id,
+        dice,
+        phase,
+        &mut report.errors,
+    );
+    let Some(raw) = probed else {
+        return;
+    };
+
+    if contains_numeric_bar_off_alias(&raw) {
+        report.numeric_bar_off_alias_seen = true;
+        report
+            .errors
+            .push(format!("{phase}: numeric alias in bestmove '{raw}'"));
+    }
+
+    let has_expected = contains_token(&raw, expected_token);
+    if expected_token.eq_ignore_ascii_case("bar") {
+        report.bar_notation_ok = has_expected;
+    } else if expected_token.eq_ignore_ascii_case("off") {
+        report.off_notation_ok = has_expected;
+    }
+
+    if !has_expected {
+        report.errors.push(format!(
+            "{phase}: expected '{expected_token}' token in bestmove '{raw}'"
+        ));
+    }
+}
+
+fn contains_numeric_bar_off_alias(raw: &str) -> bool {
+    raw.split_whitespace().any(|token| {
+        let cleaned = token.replace('*', "");
+        let parts: Vec<&str> = cleaned.split('/').collect();
+        parts.iter().any(|p| *p == "25" || *p == "0")
+    })
+}
+
+fn contains_token(raw: &str, expected: &str) -> bool {
+    raw.split_whitespace().any(|token| {
+        let cleaned = token.replace('*', "");
+        cleaned.split('/').any(|p| p.eq_ignore_ascii_case(expected))
+    })
 }
 
 fn wait_readyok(engine: &mut EngineProcess, errors: &mut Vec<String>, phase: &str) -> bool {

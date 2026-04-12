@@ -137,6 +137,10 @@ fn run_check_command(args: CheckArgs) -> Result<(), String> {
         report.supports_dice,
         report.supports_go_chequer,
     );
+    println!(
+        "notation: bar={} off={} numeric_alias_seen={}",
+        report.bar_notation_ok, report.off_notation_ok, report.numeric_bar_off_alias_seen,
+    );
     if let Some(raw) = &report.bestmove_raw {
         println!("bestmove raw: {raw}");
     }
