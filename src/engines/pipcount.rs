@@ -29,11 +29,10 @@ impl UbgiAdapter for PipcountAdapter {
             return Err("no_encodable_legal_moves".to_string());
         }
 
-        let mover_is_x = game.position().turn();
         let mut best_idx = 0usize;
-        let mut best_score = evaluate_position(legal_moves[0].1, mover_is_x);
+        let mut best_score = evaluate_position(legal_moves[0].1);
         for (idx, (_, pos)) in legal_moves.iter().enumerate().skip(1) {
-            let score = evaluate_position(*pos, mover_is_x);
+            let score = evaluate_position(*pos);
             if score > best_score {
                 best_score = score;
                 best_idx = idx;
@@ -44,54 +43,52 @@ impl UbgiAdapter for PipcountAdapter {
     }
 }
 
-fn evaluate_position(position: VariantPosition, mover_is_x: bool) -> f32 {
+fn evaluate_position(position: VariantPosition) -> f32 {
     match position {
-        VariantPosition::Backgammon(p) => eval_state(p, mover_is_x),
-        VariantPosition::Nackgammon(p) => eval_state(p, mover_is_x),
-        VariantPosition::Longgammon(p) => eval_state(p, mover_is_x),
-        VariantPosition::Hypergammon(p) => eval_state(p, mover_is_x),
-        VariantPosition::Hypergammon2(p) => eval_state(p, mover_is_x),
-        VariantPosition::Hypergammon4(p) => eval_state(p, mover_is_x),
-        VariantPosition::Hypergammon5(p) => eval_state(p, mover_is_x),
+        VariantPosition::Backgammon(p) => eval_state(p),
+        VariantPosition::Nackgammon(p) => eval_state(p),
+        VariantPosition::Longgammon(p) => eval_state(p),
+        VariantPosition::Hypergammon(p) => eval_state(p),
+        VariantPosition::Hypergammon2(p) => eval_state(p),
+        VariantPosition::Hypergammon4(p) => eval_state(p),
+        VariantPosition::Hypergammon5(p) => eval_state(p),
     }
 }
 
-fn eval_state<S: State>(p: S, mover_is_x: bool) -> f32 {
-    let mut own_pips = 0f32;
-    let mut opp_pips = 0f32;
+fn eval_state<S: State>(p: S) -> f32 {
+    let mut x_pips = 0f32;
+    let mut o_pips = 0f32;
+    let mut x_blots = 0f32;
+    let mut o_blots = 0f32;
     for pip in 1..=24 {
         let n = p.pip(pip);
-        if mover_is_x {
-            if n > 0 {
-                own_pips += (n as f32) * (pip as f32);
-            } else if n < 0 {
-                opp_pips += ((-n) as f32) * ((25 - pip) as f32);
+        if n > 0 {
+            x_pips += (n as f32) * pip as f32;
+            if n == 1 {
+                x_blots += 1.0;
             }
         } else if n < 0 {
-            own_pips += ((-n) as f32) * ((25 - pip) as f32);
-        } else if n > 0 {
-            opp_pips += (n as f32) * (pip as f32);
+            o_pips += ((-n) as f32) * (25 - pip) as f32;
+            if n == -1 {
+                o_blots += 1.0;
+            }
         }
     }
 
-    let (own_off, opp_off, own_bar, opp_bar) = if mover_is_x {
-        (
-            p.x_off() as f32,
-            p.o_off() as f32,
-            p.x_bar() as f32,
-            p.o_bar() as f32,
-        )
+    x_pips += (p.x_bar() as f32) * 25.0;
+    o_pips += (p.o_bar() as f32) * 25.0;
+
+    let x_borne = p.x_off() as f32;
+    let o_borne = p.o_off() as f32;
+
+    let x_score = -x_pips + (x_borne * 22.0) - (x_blots * 2.0) - (p.x_bar() as f32) * 3.0;
+    let o_score = -o_pips + (o_borne * 22.0) - (o_blots * 2.0) - (p.o_bar() as f32) * 3.0;
+
+    let on_roll_value = if p.turn() {
+        x_score - o_score
     } else {
-        (
-            p.o_off() as f32,
-            p.x_off() as f32,
-            p.o_bar() as f32,
-            p.x_bar() as f32,
-        )
+        o_score - x_score
     };
 
-    let pip_term = (opp_pips - own_pips) * 0.02;
-    let off_term = (own_off - opp_off) * 0.6;
-    let bar_term = (opp_bar - own_bar) * 0.5;
-    pip_term + off_term + bar_term
+    (on_roll_value / 200.0).clamp(-3.0, 3.0)
 }
