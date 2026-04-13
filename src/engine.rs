@@ -15,6 +15,7 @@ pub struct EngineProcess {
     _child: Child,
     stdin: ChildStdin,
     stdout: BufReader<ChildStdout>,
+    ubgi_log: Option<std::io::BufWriter<fs::File>>,
 }
 
 impl EngineProcess {
@@ -73,7 +74,24 @@ impl EngineProcess {
             _child: child,
             stdin,
             stdout: BufReader::new(stdout),
+            ubgi_log: None,
         })
+    }
+
+    pub fn set_ubgi_log_path(&mut self, path: Option<&Path>) -> Result<(), String> {
+        if let Some(mut writer) = self.ubgi_log.take() {
+            let _ = writer.flush();
+        }
+        let Some(path) = path else {
+            return Ok(());
+        };
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent).map_err(|e| format!("create ubgi log dir failed: {e}"))?;
+        }
+        let file = fs::File::create(path)
+            .map_err(|e| format!("open ubgi log '{}' failed: {e}", path.display()))?;
+        self.ubgi_log = Some(std::io::BufWriter::new(file));
+        Ok(())
     }
 
     pub fn init_ubgi(&mut self) -> Result<(), String> {
@@ -160,6 +178,9 @@ impl EngineProcess {
 
     pub fn quit(&mut self) {
         let _ = self.send("quit");
+        if let Some(writer) = self.ubgi_log.as_mut() {
+            let _ = writer.flush();
+        }
     }
 
     pub fn send_command(&mut self, command: &str) -> Result<(), String> {
@@ -172,6 +193,7 @@ impl EngineProcess {
 
     fn send(&mut self, command: &str) -> Result<(), String> {
         info!(command = %command, "-> engine");
+        self.write_ubgi_log("->", command);
         writeln!(self.stdin, "{command}").map_err(|e| format!("send failed: {e}"))?;
         self.stdin
             .flush()
@@ -194,8 +216,16 @@ impl EngineProcess {
                 continue;
             }
             info!(response = %line, "<- engine");
+            self.write_ubgi_log("<-", line);
             return Ok(line.to_string());
         }
+    }
+
+    fn write_ubgi_log(&mut self, direction: &str, line: &str) {
+        let Some(writer) = self.ubgi_log.as_mut() else {
+            return;
+        };
+        let _ = writeln!(writer, "{direction} {line}");
     }
 
     fn read_until(&mut self, predicate: impl Fn(&str) -> bool) -> Result<String, String> {

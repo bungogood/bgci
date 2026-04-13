@@ -3,7 +3,8 @@ use clap::Args;
 use tracing::info;
 
 use crate::config::{load_toml, resolve_engine_shortcuts, DuelConfig, EngineConfig};
-use crate::duel_runner::run_duel;
+use crate::domain::MatchPlan;
+use crate::executor::{DuelExecutor, LocalThreadExecutor};
 use crate::logging;
 use crate::output_paths::build_run_paths;
 
@@ -23,6 +24,9 @@ pub struct DuelArgs {
 
     #[arg(long)]
     parallel: Option<usize>,
+
+    #[arg(long)]
+    ubgi_log: Option<String>,
 }
 
 pub fn run(args: DuelArgs) -> Result<(), String> {
@@ -40,6 +44,7 @@ pub fn run(args: DuelArgs) -> Result<(), String> {
         output_csv = %run_paths.output_csv.display(),
         games = cfg.games,
         parallel = cfg.parallel,
+        ubgi_log = %cfg.ubgi_log,
         seed = cfg.seed,
         max_plies = cfg.max_plies,
         variant = %cfg.variant,
@@ -50,7 +55,13 @@ pub fn run(args: DuelArgs) -> Result<(), String> {
         "duel run header"
     );
 
-    let summary = run_duel(&cfg, variant, &run_paths)?;
+    let plan = MatchPlan {
+        config: cfg,
+        variant,
+    };
+    let log_enabled = logging::normalize_level(&plan.config.log).is_some();
+    let executor = LocalThreadExecutor;
+    let summary = executor.execute(&plan, &run_paths)?;
     println!("{}", summary.line_engines);
     println!("{}", summary.line_result);
     println!("{}", summary.line_rate);
@@ -58,7 +69,7 @@ pub fn run(args: DuelArgs) -> Result<(), String> {
     println!("{}", summary.line_class);
     println!("{}", summary.line_sides);
     println!("saved -> {}", run_paths.output_csv.display());
-    if logging::normalize_level(&cfg.log).is_some() {
+    if log_enabled {
         println!("log   -> {}", run_paths.log_file.display());
     }
 
@@ -74,6 +85,9 @@ fn build_duel_config(args: DuelArgs) -> Result<DuelConfig, String> {
         }
         if let Some(parallel) = args.parallel {
             cfg.parallel = parallel.max(1);
+        }
+        if let Some(ubgi_log) = args.ubgi_log {
+            cfg.ubgi_log = ubgi_log;
         }
         return Ok(cfg);
     }
@@ -107,6 +121,9 @@ fn build_duel_config(args: DuelArgs) -> Result<DuelConfig, String> {
     }
     if let Some(parallel) = args.parallel {
         cfg.parallel = parallel.max(1);
+    }
+    if let Some(ubgi_log) = args.ubgi_log {
+        cfg.ubgi_log = ubgi_log;
     }
     Ok(cfg)
 }

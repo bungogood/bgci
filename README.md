@@ -27,6 +27,22 @@ cargo run -- duel --engine-a gnubg --engine-b pubeval --games 1000
 
 # parallel workers (one engine pair per worker)
 cargo run -- duel --engine-a gnubg --engine-b pubeval --games 1000 --parallel 8
+
+# write full per-game UBGI transcripts
+cargo run -- duel --engine-a gnubg --engine-b pubeval --games 100 --ubgi-log full
+
+# submit mode (enqueue sqlite-backed run state)
+cargo run -- submit --engine-a hureval --engine-b wildbg --games 1000 --parallel 8
+
+# inspect managed run queue/status
+cargo run -- runs list
+cargo run -- runs show <run_id>
+cargo run -- runs watch <run_id>
+# or omit run_id when exactly one run is active
+cargo run -- runs watch
+cargo run -- runs cancel <run_id>
+# or omit run_id when exactly one run is active
+cargo run -- runs cancel
 ```
 
 Run an engine protocol check directly from an alias:
@@ -103,11 +119,17 @@ Set `log` in a duel config:
 - `info`: protocol traffic and run metadata
 - `debug`: includes engine stderr diagnostics
 
+Set `ubgi_log` in a duel config:
+
+- `off`: no per-game UBGI transcript files
+- `full`: writes full protocol in/out per engine per game
+
 Results and logs are derived from datetime and engine names.
 
 - output root: `data/<engine-a>-vs-<engine-b>/`
 - files: `results-<timestamp>.csv`, `duel-<timestamp>.log`
 - per-game traces: `games-<timestamp>/`
+- per-game UBGI transcripts (when enabled): `ubgi-<timestamp>/`
 
 ## Local/Private Configs
 

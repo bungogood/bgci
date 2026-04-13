@@ -16,6 +16,7 @@ pub struct DuelConfig {
     pub swap_sides: bool,
     pub variant: String,
     pub log: String,
+    pub ubgi_log: String,
     pub engine_a: EngineConfig,
     pub engine_b: EngineConfig,
 }
@@ -30,6 +31,7 @@ impl Default for DuelConfig {
             swap_sides: true,
             variant: "backgammon".to_string(),
             log: "off".to_string(),
+            ubgi_log: "off".to_string(),
             engine_a: EngineConfig::default_a(),
             engine_b: EngineConfig::default_b(),
         }

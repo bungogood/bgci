@@ -8,7 +8,6 @@ use bkgm::codecs::gnuid;
 use bkgm::dice::Dice;
 use bkgm::dice_gen::{DiceGen, FastrandDice};
 use bkgm::{normalize_move_text, Game, GameState, Variant};
-use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
 use tracing::debug;
 
 use crate::config::DuelConfig;
@@ -16,6 +15,7 @@ use crate::engine::EngineProcess;
 use crate::output_paths::RunPaths;
 use crate::report::render_status_lines;
 use crate::stats::{DuelStats, GameUpdate};
+use crate::status_display::{StatusDisplay, StatusLines};
 
 pub struct RunSummary {
     pub line_engines: String,
@@ -24,6 +24,13 @@ pub struct RunSummary {
     pub line_decide: String,
     pub line_class: String,
     pub line_sides: String,
+}
+
+#[derive(Clone)]
+#[allow(dead_code)]
+pub struct ProgressSnapshot {
+    pub done_games: usize,
+    pub lines: StatusLines,
 }
 
 enum WorkerMessage {
@@ -43,6 +50,18 @@ pub fn run_duel(
     variant: Variant,
     paths: &RunPaths,
 ) -> Result<RunSummary, String> {
+    run_duel_with_progress(cfg, variant, paths, |_| Ok(()))
+}
+
+pub fn run_duel_with_progress<F>(
+    cfg: &DuelConfig,
+    variant: Variant,
+    paths: &RunPaths,
+    mut on_game_done: F,
+) -> Result<RunSummary, String>
+where
+    F: FnMut(&ProgressSnapshot) -> Result<(), String>,
+{
     if let Some(parent) = paths.output_csv.parent() {
         fs::create_dir_all(parent).map_err(|e| e.to_string())?;
     }
@@ -57,34 +76,18 @@ pub fn run_duel(
 
     let trace_dir = paths.trace_games_dir.clone();
     fs::create_dir_all(&trace_dir).map_err(|e| e.to_string())?;
+    let ubgi_dir = if ubgi_log_enabled(&cfg.ubgi_log) {
+        fs::create_dir_all(&paths.ubgi_games_dir).map_err(|e| e.to_string())?;
+        Some(paths.ubgi_games_dir.clone())
+    } else {
+        None
+    };
 
     let mut stats = DuelStats::new();
     let workers = cfg.parallel.max(1).min(cfg.games.max(1));
 
     let run_start = Instant::now();
-    let mp = MultiProgress::new();
-    let progress = mp.add(ProgressBar::new(cfg.games as u64));
-    progress.set_style(
-        ProgressStyle::with_template(
-            "{prefix} {wide_bar:.green/black} {pos}/{len} ({percent}%) eta {eta_precise}",
-        )
-        .map_err(|e| e.to_string())?
-        .progress_chars("█▉░"),
-    );
-    progress.set_prefix("   DUEL");
-
-    let stats_engines = mp.add(ProgressBar::new_spinner());
-    stats_engines.set_style(ProgressStyle::with_template("{msg}").map_err(|e| e.to_string())?);
-    let stats_result = mp.add(ProgressBar::new_spinner());
-    stats_result.set_style(ProgressStyle::with_template("{msg}").map_err(|e| e.to_string())?);
-    let stats_rate = mp.add(ProgressBar::new_spinner());
-    stats_rate.set_style(ProgressStyle::with_template("{msg}").map_err(|e| e.to_string())?);
-    let stats_decide = mp.add(ProgressBar::new_spinner());
-    stats_decide.set_style(ProgressStyle::with_template("{msg}").map_err(|e| e.to_string())?);
-    let stats_class = mp.add(ProgressBar::new_spinner());
-    stats_class.set_style(ProgressStyle::with_template("{msg}").map_err(|e| e.to_string())?);
-    let stats_sides = mp.add(ProgressBar::new_spinner());
-    stats_sides.set_style(ProgressStyle::with_template("{msg}").map_err(|e| e.to_string())?);
+    let display = StatusDisplay::new(cfg.games, "   DUEL")?;
 
     let (tx, rx) = mpsc::channel::<WorkerMessage>();
     let engine_a_cfg = cfg.engine_a.clone();
@@ -93,6 +96,7 @@ pub fn run_duel(
     let swap_sides = cfg.swap_sides;
     let base_seed = cfg.seed;
     let games = cfg.games;
+    let ubgi_dir_for_workers = ubgi_dir.clone();
 
     thread::scope(|scope| {
         for worker_id in 0..workers {
@@ -100,6 +104,7 @@ pub fn run_duel(
             let engine_a_cfg = engine_a_cfg.clone();
             let engine_b_cfg = engine_b_cfg.clone();
             let worker_variant = variant;
+            let worker_ubgi_dir = ubgi_dir_for_workers.clone();
             scope.spawn(move || {
                 let mut engine_a = match EngineProcess::spawn(&engine_a_cfg) {
                     Ok(e) => e,
@@ -147,6 +152,29 @@ pub fn run_duel(
                 }
 
                 for game_idx in (worker_id..games).step_by(workers) {
+                    if let Some(dir) = &worker_ubgi_dir {
+                        let a_path = dir.join(format!("game_{:05}.engine-a.log", game_idx + 1));
+                        let b_path = dir.join(format!("game_{:05}.engine-b.log", game_idx + 1));
+                        if let Err(err) = engine_a.set_ubgi_log_path(Some(&a_path)) {
+                            let _ = tx.send(WorkerMessage::Error(format!(
+                                "worker {} game {} UBGI log setup(A) failed: {}",
+                                worker_id + 1,
+                                game_idx + 1,
+                                err
+                            )));
+                            break;
+                        }
+                        if let Err(err) = engine_b.set_ubgi_log_path(Some(&b_path)) {
+                            let _ = tx.send(WorkerMessage::Error(format!(
+                                "worker {} game {} UBGI log setup(B) failed: {}",
+                                worker_id + 1,
+                                game_idx + 1,
+                                err
+                            )));
+                            break;
+                        }
+                    }
+
                     let a_is_x = !(swap_sides && game_idx % 2 == 1);
                     if let Err(err) = engine_a.new_game() {
                         let _ = tx.send(WorkerMessage::Error(format!(
@@ -223,22 +251,11 @@ pub fn run_duel(
                 WorkerMessage::Game(done) => {
                     done_games += 1;
                     if run_error.is_none() {
-                        process_completed_game(
-                            &done,
-                            cfg,
-                            &trace_dir,
-                            &mut csv,
-                            &mut stats,
-                            run_start,
-                            &progress,
-                            &stats_engines,
-                            &stats_result,
-                            &stats_rate,
-                            &stats_decide,
-                            &stats_class,
-                            &stats_sides,
+                        let snapshot = process_completed_game(
+                            &done, cfg, &trace_dir, &mut csv, &mut stats, run_start, &display,
                             done_games,
                         )?;
+                        on_game_done(&snapshot)?;
                     }
                 }
             }
@@ -251,13 +268,7 @@ pub fn run_duel(
         Ok(())
     })?;
 
-    progress.finish_and_clear();
-    stats_engines.finish_and_clear();
-    stats_result.finish_and_clear();
-    stats_rate.finish_and_clear();
-    stats_decide.finish_and_clear();
-    stats_class.finish_and_clear();
-    stats_sides.finish_and_clear();
+    display.finish();
 
     let elapsed = run_start.elapsed();
     let (line_engines, line_result, line_rate, line_decide, line_class, line_sides) =
@@ -298,15 +309,9 @@ fn process_completed_game(
     csv: &mut BufWriter<fs::File>,
     stats: &mut DuelStats,
     run_start: Instant,
-    progress: &ProgressBar,
-    stats_engines: &ProgressBar,
-    stats_result: &ProgressBar,
-    stats_rate: &ProgressBar,
-    stats_decide: &ProgressBar,
-    stats_class: &ProgressBar,
-    stats_sides: &ProgressBar,
+    display: &StatusDisplay,
     done_games: usize,
-) -> Result<(), String> {
+) -> Result<ProgressSnapshot, String> {
     let game_idx = done.game_idx;
     let a_is_x = done.a_is_x;
     let result = &done.result;
@@ -424,15 +429,17 @@ fn process_completed_game(
             done_games,
             elapsed,
         ));
-    progress.set_position(done_games as u64);
-    stats_engines.set_message(line_engines);
-    stats_result.set_message(line_result);
-    stats_rate.set_message(line_rate);
-    stats_decide.set_message(line_decide);
-    stats_class.set_message(line_class);
-    stats_sides.set_message(line_sides);
+    let lines = StatusLines {
+        line_engines,
+        line_result,
+        line_rate,
+        line_decide,
+        line_class,
+        line_sides,
+    };
+    display.update(done_games, &lines);
 
-    Ok(())
+    Ok(ProgressSnapshot { done_games, lines })
 }
 
 fn seed_for_game(base_seed: u64, game_idx: usize) -> u64 {
@@ -440,6 +447,10 @@ fn seed_for_game(base_seed: u64, game_idx: usize) -> u64 {
     z = (z ^ (z >> 30)).wrapping_mul(0xBF58476D1CE4E5B9);
     z = (z ^ (z >> 27)).wrapping_mul(0x94D049BB133111EB);
     z ^ (z >> 31)
+}
+
+fn ubgi_log_enabled(mode: &str) -> bool {
+    matches!(mode.trim().to_ascii_lowercase().as_str(), "full" | "trace")
 }
 
 fn play_game(

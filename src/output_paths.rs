@@ -7,6 +7,7 @@ pub struct RunPaths {
     pub output_csv: PathBuf,
     pub log_file: PathBuf,
     pub trace_games_dir: PathBuf,
+    pub ubgi_games_dir: PathBuf,
 }
 
 pub fn build_run_paths(engine_a: &str, engine_b: &str) -> RunPaths {
@@ -22,11 +23,16 @@ pub fn build_run_paths(engine_a: &str, engine_b: &str) -> RunPaths {
         .parent()
         .unwrap_or_else(|| Path::new("."))
         .join(format!("games-{timestamp}"));
+    let ubgi_games_dir = output_csv
+        .parent()
+        .unwrap_or_else(|| Path::new("."))
+        .join(format!("ubgi-{timestamp}"));
     RunPaths {
         timestamp,
         output_csv,
         log_file,
         trace_games_dir,
+        ubgi_games_dir,
     }
 }
 
