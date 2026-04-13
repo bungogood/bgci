@@ -1,123 +1,68 @@
 # bgci
 
-bgci is a lightweight runner for the Universal Backgammon Interface (UBGI), a work-in-progress protocol for backgammon engine communication and control. It provides duel orchestration, logging, and result collection so you can quickly configure and run matches between different engines.
+`bgci` runs backgammon engine duels over UBGI.
 
-![bgci pubeval vs random](docs/pubeval-vs-random.gif)
+## Install
 
-UBGI is inspired by the chess Universal Chess Interface (UCI) and defines a simple, engine-agnostic protocol for exchanging moves, diagnostics, and match metadata. bgci implements UBGI's duel-management features, making it easy to set up tournaments, capture per-game traces, and export results. Based on early UBGI protocol work by Øystein Schønning-Johansen [here](https://github.com/oysteijo/Universal-Backgammon-Interface)
+Clone the repo and run:
+
+```bash
+cargo install --path .
+```
 
 ## Quick Start
 
-Run baseline example from a duel config:
-
 ```bash
-cargo run -- duel --config examples/pubeval-vs-random.toml
+bgci duel --engine-a pubeval --engine-b random --games 1000
+bgci check pubeval
+bgci engine --list
 ```
 
-Run GNUbg adapter vs random:
+## Important: User Engine Aliases
 
-```bash
-cargo run -- duel --config examples/gnubg-cli-vs-random.toml
-```
+bgci supports XDG config and reads aliases from
+`XDG_CONFIG_HOME` (e.g `~/.config/bgci/config.toml`).
 
-Run a duel directly without a duel config file:
-
-```bash
-cargo run -- duel --engine-a gnubg --engine-b pubeval --games 1000
-
-# parallel workers (one engine pair per worker)
-cargo run -- duel --engine-a gnubg --engine-b pubeval --games 1000 --parallel 8
-```
-
-Run an engine protocol check directly from an alias:
-
-```bash
-cargo run -- check --engine pubeval
-```
-
-Built-in engines can now be referenced directly in config using `engine`:
-
-- `engine = "pipcount"`
-- `engine = "hureval"`
-- `engine = "pubeval"`
-- `engine = "random"`
-- `engine = "gnubg-cli"`
-
-Use `command = ["..."]` only for ad-hoc direct process commands.
-
-You can also define reusable engine shortcuts in user config (`$XDG_CONFIG_HOME/bgci/config.toml` or `~/.config/bgci/config.toml`):
+Example:
 
 ```toml
-[engines.xg]
-command = ["xg", "--ubgi"]
+[engines.wildbg]
+command = ["/path/to/wildbg", "--ubgi"]
 
-[engines.gnubg-local]
-command = "gnubg-cli"
-env = { BGCI_GNUBG_BIN = "/opt/homebrew/bin/gnubg" }
+[engines.gnubg]
+command = ["/path/to/gnubg", "--ubgi", "--pkgdatadir", "/path/to/share", "--datadir", "/path/to/share"]
 ```
 
-Then duel configs can stay lightweight:
-
-```toml
-[engine_a]
-name = "xg"
-engine = "xg"
-
-[engine_b]
-name = "pubeval"
-engine = "pubeval"
-```
-
-Set `BGCI_CONFIG=/path/to/config.toml` to override the default user config path.
-
-List all available engine aliases (built-ins + user config):
+Then you can duel aliases directly:
 
 ```bash
-cargo run -- engine --list
-
-# include source/command/env for each alias
-cargo run -- engine --list --verbose
-
-# run an engine directly and pass extra args through
-cargo run -- engine pubeval -- --weights-dir ./my-weights
+bgci duel --engine-a gnubg --engine-b wildbg --games 1000
 ```
 
-`pubeval` ships with embedded default weights, so it works from any working directory.
-You can override with:
+## Useful Commands
 
-- `--weights-race <path>`
-- `--weights-contact <path>`
-- `--weights-dir <dir>` (expects `WT.race` and `WT.cntc`)
+```bash
+# duel from config
+bgci duel --config examples/pubeval-vs-random.toml
 
-## Public Duel Configs
+# check both engines in a config
+bgci check --config examples/pubeval-vs-random.toml
 
-- `examples/pubeval-vs-random.toml` (baseline example)
-- `examples/gnubg-cli-vs-random.toml`
-- `examples/gnubg-cli-vs-pubeval.toml`
+# check one side from config
+bgci check --config examples/pubeval-vs-random.toml a
+bgci check --config examples/pubeval-vs-random.toml b
+```
 
-## Logging
+## UBGI Protocol
 
-Set `log` in a duel config:
+bgci speaks UBGI (Universal Backgammon Interface), a UCI-inspired protocol for
+engine communication.
 
-- `off`: no duel log file
-- `info`: protocol traffic and run metadata
-- `debug`: includes engine stderr diagnostics
+Primary reference for this project:
 
-Results and logs are derived from datetime and engine names.
+- `docs/ubgi-v0.1-spec.md`
 
-- output root: `data/<engine-a>-vs-<engine-b>/`
-- files: `results-<timestamp>.csv`, `duel-<timestamp>.log`
-- per-game traces: `games-<timestamp>/`
+## References
 
-## Local/Private Configs
-
-`config/` is gitignored. Copy any file from `examples/` into `config/` and edit locally.
-
-## Docs
-
-See `docs/ubgi-v0.1-spec.md`.
-
-GNU Backgammon (GNUbg) adapter reference:
-
-- `examples/gnubg-cli-vs-random.toml` and `examples/gnubg-cli-vs-pubeval.toml` use the built-in `gnubg-cli` adapter, which adapts GNUbg's existing text CLI to UBGI.
-- `https://www.gnu.org/software/gnubg/`
+- UBGI early protocol work: <https://github.com/oysteijo/Universal-Backgammon-Interface>
+- GNU Backgammon: <https://www.gnu.org/software/gnubg/>

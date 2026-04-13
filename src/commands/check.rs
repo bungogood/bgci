@@ -9,30 +9,49 @@ pub struct CheckArgs {
     #[arg(long)]
     config: Option<String>,
 
-    #[arg(long)]
-    engine: String,
+    engine: Option<String>,
 
     #[arg(long)]
     variant: Option<String>,
 }
 
 pub fn run(args: CheckArgs) -> Result<(), String> {
-    let (engine_cfg, default_variant) = if let Some(config_path) = args.config {
+    if let Some(config_path) = args.config {
         let mut cfg: DuelConfig = load_toml(&config_path)?;
         resolve_engine_shortcuts(&mut cfg)?;
-        let selected = match args.engine.to_ascii_lowercase().as_str() {
-            "a" => cfg.engine_a,
-            "b" => cfg.engine_b,
-            _ => resolve_engine_reference(&args.engine)?,
+        let selected = match args.engine.as_deref() {
+            Some(engine) if engine.eq_ignore_ascii_case("a") => vec![(cfg.engine_a, cfg.variant)],
+            Some(engine) if engine.eq_ignore_ascii_case("b") => vec![(cfg.engine_b, cfg.variant)],
+            Some(engine) => vec![(resolve_engine_reference(engine)?, cfg.variant)],
+            None => vec![
+                (cfg.engine_a, cfg.variant.clone()),
+                (cfg.engine_b, cfg.variant),
+            ],
         };
-        (selected, cfg.variant)
-    } else {
-        (
-            resolve_engine_reference(&args.engine)?,
-            "backgammon".to_string(),
-        )
-    };
-    let variant_name = args.variant.unwrap_or(default_variant);
+
+        for (idx, (engine_cfg, default_variant)) in selected.into_iter().enumerate() {
+            if idx > 0 {
+                println!();
+            }
+            run_single(engine_cfg, default_variant, args.variant.clone())?;
+        }
+
+        return Ok(());
+    }
+
+    let engine = args.engine.as_deref().ok_or_else(|| {
+        "missing engine. usage: bgci check <engine> or bgci check --config <path> [a|b]".to_string()
+    })?;
+    let engine_cfg = resolve_engine_reference(engine)?;
+    run_single(engine_cfg, "backgammon".to_string(), args.variant)
+}
+
+fn run_single(
+    engine_cfg: crate::config::EngineConfig,
+    default_variant: String,
+    variant_override: Option<String>,
+) -> Result<(), String> {
+    let variant_name = variant_override.unwrap_or(default_variant);
     let variant = parse_variant(&variant_name)?;
 
     let report = run_check(&engine_cfg, variant)?;
