@@ -251,6 +251,8 @@ pub fn run_duel(
         Ok(())
     })?;
 
+    csv.flush().map_err(|e| e.to_string())?;
+
     progress.finish_and_clear();
     stats_engines.finish_and_clear();
     stats_result.finish_and_clear();
@@ -414,7 +416,9 @@ fn process_completed_game(
         result.plies
     )
     .map_err(|e| e.to_string())?;
-    csv.flush().map_err(|e| e.to_string())?;
+    if done_games.is_multiple_of(256) {
+        csv.flush().map_err(|e| e.to_string())?;
+    }
 
     let elapsed = run_start.elapsed();
     let (line_engines, line_result, line_rate, line_decide, line_class, line_sides) =
@@ -477,7 +481,6 @@ fn play_game(
                 trace_lines,
             });
         }
-        let legal_ids: Vec<String> = legal.iter().map(|p| gnuid::encode(*p)).collect();
         let position_id = gnuid::encode(game.position());
         let x_to_move = game.position().turn();
         let a_to_move = x_to_move == a_is_x;
@@ -523,6 +526,7 @@ fn play_game(
         let next = match game.position().apply_move(dice, &chosen_move) {
             Some(pos) => pos,
             None => {
+                let legal_ids: Vec<String> = legal.iter().map(|p| gnuid::encode(*p)).collect();
                 let preview = legal_ids
                     .iter()
                     .take(12)
@@ -543,10 +547,7 @@ fn play_game(
             }
         };
 
-        if !legal
-            .iter()
-            .any(|candidate| gnuid::encode(*candidate) == gnuid::encode(next))
-        {
+        if !legal.contains(&next) {
             return Err(format!(
                 "engine returned move not in legal children: turn={} pos={} dice={}/{} choice_raw={} choice={}",
                 if a_to_move { "A" } else { "B" },

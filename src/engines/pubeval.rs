@@ -26,11 +26,8 @@ impl UbgiAdapter for PubevalAdapter {
     }
 
     fn choose_move(&mut self, game: &Game, dice: Dice) -> Result<String, String> {
-        let legal_moves = game
-            .position()
-            .legal_moves(dice)
-            .map_err(|err| format!("move_encode {err}"))?;
-        if legal_moves.is_empty() {
+        let legal_positions = game.legal_positions(&dice);
+        if legal_positions.is_empty() {
             return Err("no_encodable_legal_moves".to_string());
         }
 
@@ -40,8 +37,8 @@ impl UbgiAdapter for PubevalAdapter {
 
         let mut best_idx = 0usize;
         let mut best_score =
-            score_position(&to_pubeval_board(legal_moves[0].1, mover_is_x), race, w);
-        for (idx, (_, pos)) in legal_moves.iter().enumerate().skip(1) {
+            score_position(&to_pubeval_board(legal_positions[0], mover_is_x), race, w);
+        for (idx, pos) in legal_positions.iter().enumerate().skip(1) {
             let board = to_pubeval_board(*pos, mover_is_x);
             let score = score_position(&board, race, w);
             if score > best_score {
@@ -50,7 +47,9 @@ impl UbgiAdapter for PubevalAdapter {
             }
         }
 
-        Ok(legal_moves[best_idx].0.to_string())
+        game.position()
+            .encode_move(legal_positions[best_idx], dice)
+            .map_err(|err| format!("move_encode {err}"))
     }
 }
 

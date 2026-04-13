@@ -128,14 +128,13 @@ impl EngineProcess {
         &mut self,
         position_id: &str,
         dice: Dice,
-        x_to_move: bool,
+        _x_to_move: bool,
     ) -> Result<String, String> {
         let (d1, d2) = match dice {
             Dice::Double(d) => (d, d),
             Dice::Mixed(m) => (m.big(), m.small()),
         };
         self.send(&format!("position gnubgid {position_id}"))?;
-        self.send(&format!("setturn {}", if x_to_move { "p0" } else { "p1" }))?;
         self.send(&format!("dice {d1} {d2}"))?;
         self.send("go role chequer")?;
         loop {

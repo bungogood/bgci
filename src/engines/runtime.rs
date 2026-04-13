@@ -104,20 +104,6 @@ pub fn run_ubgi_loop(adapter: &mut impl UbgiAdapter) {
                 reply(&mut stdout, "error missing_context dice");
                 continue;
             };
-            let legal_moves = match game.position().legal_moves(current_dice) {
-                Ok(moves) => moves,
-                Err(err) => {
-                    reply(&mut stdout, &format!("error internal move_encode {err}"));
-                    continue;
-                }
-            };
-            if legal_moves.is_empty() {
-                reply(
-                    &mut stdout,
-                    "error internal move_encode no_encodable_legal_moves",
-                );
-                continue;
-            }
             match adapter.choose_move(&game, current_dice) {
                 Ok(mv) => reply(&mut stdout, &format!("bestmove {mv}")),
                 Err(err) => reply(

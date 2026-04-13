@@ -21,14 +21,13 @@ impl UbgiAdapter for RandomAdapter {
     }
 
     fn choose_move(&mut self, game: &Game, dice: Dice) -> Result<String, String> {
-        let legal_moves = game
-            .position()
-            .legal_moves(dice)
-            .map_err(|err| format!("move_encode {err}"))?;
-        if legal_moves.is_empty() {
+        let legal_positions = game.legal_positions(&dice);
+        if legal_positions.is_empty() {
             return Err("no_encodable_legal_moves".to_string());
         }
-        let index = fastrand::usize(..legal_moves.len());
-        Ok(legal_moves[index].0.to_string())
+        let index = fastrand::usize(..legal_positions.len());
+        game.position()
+            .encode_move(legal_positions[index], dice)
+            .map_err(|err| format!("move_encode {err}"))
     }
 }

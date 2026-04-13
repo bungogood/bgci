@@ -21,17 +21,14 @@ impl UbgiAdapter for PipcountAdapter {
     }
 
     fn choose_move(&mut self, game: &Game, dice: Dice) -> Result<String, String> {
-        let legal_moves = game
-            .position()
-            .legal_moves(dice)
-            .map_err(|err| format!("move_encode {err}"))?;
-        if legal_moves.is_empty() {
+        let legal_positions = game.legal_positions(&dice);
+        if legal_positions.is_empty() {
             return Err("no_encodable_legal_moves".to_string());
         }
 
         let mut best_idx = 0usize;
-        let mut best_score = evaluate_position(legal_moves[0].1);
-        for (idx, (_, pos)) in legal_moves.iter().enumerate().skip(1) {
+        let mut best_score = evaluate_position(legal_positions[0]);
+        for (idx, pos) in legal_positions.iter().enumerate().skip(1) {
             let score = evaluate_position(*pos);
             if score > best_score {
                 best_score = score;
@@ -39,7 +36,9 @@ impl UbgiAdapter for PipcountAdapter {
             }
         }
 
-        Ok(legal_moves[best_idx].0.to_string())
+        game.position()
+            .encode_move(legal_positions[best_idx], dice)
+            .map_err(|err| format!("move_encode {err}"))
     }
 }
 
