@@ -2,6 +2,8 @@
 
 `bgci` runs backgammon engine duels over UBGI.
 
+![bgci pubeval vs random](docs/pubeval-vs-random.gif)
+
 ## Install
 
 Clone the repo and run:
@@ -32,6 +34,11 @@ command = ["/path/to/wildbg", "--ubgi"]
 [engines.gnubg]
 command = ["/path/to/gnubg", "--ubgi", "--pkgdatadir", "/path/to/share", "--datadir", "/path/to/share"]
 ```
+
+References:
+
+- GNUbg fork with native UBGI support: <https://github.com/bungogood/gnubg-ubgi>
+- wildbg by Carsten Wenderdel: <https://github.com/carsten-wenderdel/wildbg>
 
 Then you can duel aliases directly:
 
