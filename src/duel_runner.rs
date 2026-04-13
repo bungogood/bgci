@@ -42,18 +42,24 @@ pub fn run_duel(
     cfg: &DuelConfig,
     variant: Variant,
     paths: &RunPaths,
+    save_results: bool,
 ) -> Result<RunSummary, String> {
-    if let Some(parent) = paths.output_csv.parent() {
-        fs::create_dir_all(parent).map_err(|e| e.to_string())?;
-    }
-    let file = fs::File::create(&paths.output_csv).map_err(|e| e.to_string())?;
-    let mut csv = BufWriter::new(file);
-    writeln!(
-        csv,
-        "game,engine_x,engine_o,winner,outcome,points_x,points_o,points_a,points_b,plies"
-    )
-    .map_err(|e| e.to_string())?;
-    csv.flush().map_err(|e| e.to_string())?;
+    let mut csv = if save_results {
+        if let Some(parent) = paths.output_csv.parent() {
+            fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+        }
+        let file = fs::File::create(&paths.output_csv).map_err(|e| e.to_string())?;
+        let mut writer = BufWriter::new(file);
+        writeln!(
+            writer,
+            "game,engine_x,engine_o,winner,outcome,points_x,points_o,points_a,points_b,plies"
+        )
+        .map_err(|e| e.to_string())?;
+        writer.flush().map_err(|e| e.to_string())?;
+        Some(writer)
+    } else {
+        None
+    };
 
     let trace_dir = paths.trace_games_dir.clone();
     fs::create_dir_all(&trace_dir).map_err(|e| e.to_string())?;
@@ -251,7 +257,9 @@ pub fn run_duel(
         Ok(())
     })?;
 
-    csv.flush().map_err(|e| e.to_string())?;
+    if let Some(csv) = csv.as_mut() {
+        csv.flush().map_err(|e| e.to_string())?;
+    }
 
     progress.finish_and_clear();
     stats_engines.finish_and_clear();
@@ -297,7 +305,7 @@ fn process_completed_game(
     done: &CompletedGame,
     cfg: &DuelConfig,
     trace_dir: &std::path::Path,
-    csv: &mut BufWriter<fs::File>,
+    csv: &mut Option<BufWriter<fs::File>>,
     stats: &mut DuelStats,
     run_start: Instant,
     progress: &ProgressBar,
@@ -401,23 +409,25 @@ fn process_completed_game(
         }
     };
 
-    writeln!(
-        csv,
-        "{},{},{},{},{},{:.1},{:.1},{:.1},{:.1},{}",
-        game_idx + 1,
-        engine_x,
-        engine_o,
-        winner_name,
-        outcome,
-        result.points_x,
-        result.points_o,
-        a_game_points,
-        b_game_points,
-        result.plies
-    )
-    .map_err(|e| e.to_string())?;
-    if done_games.is_multiple_of(256) {
-        csv.flush().map_err(|e| e.to_string())?;
+    if let Some(csv) = csv.as_mut() {
+        writeln!(
+            csv,
+            "{},{},{},{},{},{:.1},{:.1},{:.1},{:.1},{}",
+            game_idx + 1,
+            engine_x,
+            engine_o,
+            winner_name,
+            outcome,
+            result.points_x,
+            result.points_o,
+            a_game_points,
+            b_game_points,
+            result.plies
+        )
+        .map_err(|e| e.to_string())?;
+        if done_games.is_multiple_of(256) {
+            csv.flush().map_err(|e| e.to_string())?;
+        }
     }
 
     let elapsed = run_start.elapsed();
