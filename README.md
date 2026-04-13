@@ -16,7 +16,7 @@ cargo install --path .
 
 ```bash
 bgci duel --engine-a pubeval --engine-b random --games 1000
-bgci check pubeval
+bgci check pubeval  # check UBGI compatibility
 bgci engine --list
 ```
 
