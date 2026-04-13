@@ -31,6 +31,9 @@ pub struct DuelArgs {
     #[arg(short = 'm', long = "max-plies")]
     max_plies: Option<usize>,
 
+    #[arg(short = 't', long = "timeout-secs")]
+    timeout_secs: Option<u64>,
+
     #[arg(short = 'v', long)]
     variant: Option<String>,
 
@@ -50,7 +53,7 @@ pub struct DuelArgs {
     output_csv: Option<String>,
 }
 
-pub fn run(args: DuelArgs) -> Result<(), String> {
+pub async fn run(args: DuelArgs) -> Result<(), String> {
     let mut cfg = build_duel_config(&args)?;
     resolve_engine_shortcuts(&mut cfg)?;
 
@@ -72,6 +75,7 @@ pub fn run(args: DuelArgs) -> Result<(), String> {
         parallel = cfg.parallel,
         seed = cfg.seed,
         max_plies = cfg.max_plies,
+        timeout_secs = cfg.timeout_secs,
         variant = %cfg.variant,
         engine_a = %cfg.engine_a.name,
         engine_a_cmd = %cfg.engine_a.command.join(" "),
@@ -80,7 +84,7 @@ pub fn run(args: DuelArgs) -> Result<(), String> {
         "duel run header"
     );
 
-    let summary = run_duel(&cfg, variant, &run_paths, save_results)?;
+    let summary = run_duel(&cfg, variant, &run_paths, save_results).await?;
     println!("{}", summary.line_engines);
     println!("{}", summary.line_result);
     println!("{}", summary.line_rate);
@@ -161,6 +165,9 @@ fn build_duel_config(args: &DuelArgs) -> Result<DuelConfig, String> {
     }
     if let Some(max_plies) = args.max_plies {
         cfg.max_plies = max_plies.max(1);
+    }
+    if let Some(timeout_secs) = args.timeout_secs {
+        cfg.timeout_secs = Some(timeout_secs.max(1));
     }
     if let Some(variant) = &args.variant {
         cfg.variant = variant.clone();
