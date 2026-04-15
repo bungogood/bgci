@@ -3,7 +3,7 @@ use clap::Args;
 use std::path::PathBuf;
 use tracing::info;
 
-use crate::config::{load_toml, resolve_engine_shortcuts, DuelConfig, EngineConfig};
+use crate::config::{DuelConfig, EngineConfig, load_toml, resolve_engine_shortcuts};
 use crate::duel_runner::run_duel;
 use crate::logging;
 use crate::output_paths::build_run_paths;
@@ -46,11 +46,20 @@ pub struct DuelArgs {
     #[arg(short = 'n', long = "no-swap-sides")]
     no_swap_sides: bool,
 
-    #[arg(short = 'S', long)]
+    #[arg(short = 'S', long, help = "Enable default CSV and trace outputs")]
     save: bool,
 
-    #[arg(short = 'o', long = "output")]
+    #[arg(short = 'o', long = "output", visible_alias = "output-csv")]
     output_csv: Option<String>,
+
+    #[arg(long = "output-mat")]
+    output_mat: Option<String>,
+
+    #[arg(long = "output-log")]
+    output_log: Option<String>,
+
+    #[arg(long = "output-traces")]
+    output_traces_dir: Option<String>,
 }
 
 pub async fn run(args: DuelArgs) -> Result<(), String> {
@@ -58,19 +67,43 @@ pub async fn run(args: DuelArgs) -> Result<(), String> {
     resolve_engine_shortcuts(&mut cfg)?;
 
     let mut run_paths = build_run_paths(&cfg.engine_a.name, &cfg.engine_b.name);
-    if let Some(path) = &args.output_csv {
+    if let Some(path) = &cfg.output_csv {
         run_paths.output_csv = PathBuf::from(path);
     }
-    let save_results = args.save || args.output_csv.is_some();
-    let _log_guard = logging::init_tracing(&cfg.log, &run_paths.log_file)?;
+    if let Some(path) = &cfg.output_mat {
+        run_paths.output_mat = PathBuf::from(path);
+    }
+    if let Some(path) = &cfg.output_log {
+        run_paths.log_file = PathBuf::from(path);
+    }
+    if let Some(path) = &cfg.output_traces_dir {
+        run_paths.trace_games_dir = PathBuf::from(path);
+    }
+
+    let save_csv = args.save || cfg.output_csv.is_some();
+    let save_traces = args.save || cfg.output_traces_dir.is_some();
+    let save_mat = cfg.output_mat.is_some();
+    let save_log = logging::normalize_level(&cfg.log).is_some() && cfg.output_log.is_some();
+
+    let _log_guard = if save_log {
+        logging::init_tracing(&cfg.log, &run_paths.log_file)?
+    } else {
+        None
+    };
     let variant = parse_variant(&cfg.variant)?;
 
     info!(
         run = %run_paths.timestamp,
         log = %cfg.log,
         log_path = %run_paths.log_file.display(),
-        save_results,
+        save_csv,
+        save_traces,
+        save_mat,
+        save_log,
         output_csv = %run_paths.output_csv.display(),
+        output_mat = %run_paths.output_mat.display(),
+        output_log = %run_paths.log_file.display(),
+        output_traces = %run_paths.trace_games_dir.display(),
         games = cfg.games,
         parallel = cfg.parallel,
         seed = cfg.seed,
@@ -84,21 +117,37 @@ pub async fn run(args: DuelArgs) -> Result<(), String> {
         "duel run header"
     );
 
-    let summary = run_duel(&cfg, variant, &run_paths, save_results).await?;
+    let summary = run_duel(&cfg, variant, &run_paths, save_csv, save_traces, save_mat).await?;
     println!("{}", summary.line_engines);
     println!("{}", summary.line_result);
     println!("{}", summary.line_rate);
     println!("{}", summary.line_decide);
     println!("{}", summary.line_class);
     println!("{}", summary.line_sides);
-    if save_results {
+    if save_csv {
         println!("saved -> {}", run_paths.output_csv.display());
     }
-    if logging::normalize_level(&cfg.log).is_some() {
+    if save_mat {
+        println!("mat   -> {}", run_paths.output_mat.display());
+    }
+    if save_traces {
+        println!("trace -> {}", run_paths.trace_games_dir.display());
+    }
+    if save_log {
         println!("log   -> {}", run_paths.log_file.display());
     }
 
-    info!(save_results, output_csv = %run_paths.output_csv.display(), "duel run complete");
+    info!(
+        save_csv,
+        save_traces,
+        save_mat,
+        save_log,
+        output_csv = %run_paths.output_csv.display(),
+        output_mat = %run_paths.output_mat.display(),
+        output_log = %run_paths.log_file.display(),
+        output_traces = %run_paths.trace_games_dir.display(),
+        "duel run complete"
+    );
     Ok(())
 }
 
@@ -175,6 +224,19 @@ fn build_duel_config(args: &DuelArgs) -> Result<DuelConfig, String> {
     if let Some(log) = &args.log {
         cfg.log = log.clone();
     }
+    if let Some(output_csv) = &args.output_csv {
+        cfg.output_csv = Some(output_csv.clone());
+    }
+    if let Some(output_mat) = &args.output_mat {
+        cfg.output_mat = Some(output_mat.clone());
+    }
+    if let Some(output_log) = &args.output_log {
+        cfg.output_log = Some(output_log.clone());
+    }
+    if let Some(output_traces_dir) = &args.output_traces_dir {
+        cfg.output_traces_dir = Some(output_traces_dir.clone());
+    }
+
     if args.swap_sides && args.no_swap_sides {
         return Err("cannot pass both --swap-sides and --no-swap-sides".to_string());
     }

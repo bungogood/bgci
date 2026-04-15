@@ -5,6 +5,7 @@ use time::OffsetDateTime;
 pub struct RunPaths {
     pub timestamp: String,
     pub output_csv: PathBuf,
+    pub output_mat: PathBuf,
     pub log_file: PathBuf,
     pub trace_games_dir: PathBuf,
 }
@@ -14,6 +15,7 @@ pub fn build_run_paths(engine_a: &str, engine_b: &str) -> RunPaths {
     let matchup = format!("{}-vs-{}", slug(engine_a), slug(engine_b));
     let root = Path::new("data").join(matchup);
     let output_csv = root.join(format!("results-{timestamp}.csv"));
+    let output_mat = root.join(format!("results-{timestamp}.mat"));
     let log_file = output_csv
         .parent()
         .unwrap_or_else(|| Path::new("."))
@@ -25,6 +27,7 @@ pub fn build_run_paths(engine_a: &str, engine_b: &str) -> RunPaths {
     RunPaths {
         timestamp,
         output_csv,
+        output_mat,
         log_file,
         trace_games_dir,
     }

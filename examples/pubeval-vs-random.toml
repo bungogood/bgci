@@ -4,6 +4,10 @@ max_plies = 512
 swap_sides = true
 variant = "backgammon"
 log = "info"
+output_csv = "data/pubeval-vs-random/results.csv"
+output_mat = "data/pubeval-vs-random/results.mat"
+output_log = "data/pubeval-vs-random/duel.log"
+output_traces_dir = "data/pubeval-vs-random/games"
 
 [engine_a]
 name = "pubeval"

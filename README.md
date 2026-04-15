@@ -20,6 +20,16 @@ bgci check pubeval  # check UBGI compatibility
 bgci engine --list
 ```
 
+By default, duel runs do not write CSV, MAT, or trace/log files.
+Enable outputs explicitly with CLI flags or in config.
+
+```bash
+bgci duel --engine-a pubeval --engine-b random --games 1000 --output-csv results.csv
+bgci duel --engine-a pubeval --engine-b random --games 1000 --output-mat results.mat
+bgci duel --engine-a pubeval --engine-b random --games 1000 --output-traces traces/
+bgci duel --engine-a pubeval --engine-b random --games 1000 --log info --output-log duel.log
+```
+
 ## Important: User Engine Aliases
 
 bgci supports XDG config and reads aliases from
