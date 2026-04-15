@@ -1,7 +1,7 @@
 use std::fs;
 use std::io::{BufWriter, Write};
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Instant;
 
 use bkgm::Variant;
@@ -12,7 +12,8 @@ use tracing::debug;
 
 use crate::config::DuelConfig;
 use crate::duel_messages::{CompletedGame, WorkerMessage};
-use crate::duel_workers::{spawn_local_workers, LocalWorkerSpec};
+use crate::duel_workers::{LocalWorkerSpec, spawn_local_workers};
+use crate::export::mat::{MatGameRecord, write_gnubg_mat};
 use crate::output_paths::RunPaths;
 use crate::report::render_status_lines;
 use crate::stats::{DuelStats, GameUpdate};
@@ -30,9 +31,11 @@ pub async fn run_duel(
     cfg: &DuelConfig,
     variant: Variant,
     paths: &RunPaths,
-    save_results: bool,
+    save_csv: bool,
+    save_traces: bool,
+    save_mat: bool,
 ) -> Result<RunSummary, String> {
-    let mut artifacts = RunArtifacts::new(paths, save_results)?;
+    let mut artifacts = RunArtifacts::new(paths, save_csv, save_traces, save_mat)?;
     let ui = ProgressUi::new(cfg.games)?;
 
     let mut stats = DuelStats::new();
@@ -116,12 +119,28 @@ pub async fn run_duel(
         return Err(err);
     }
 
+    if artifacts.save_mat {
+        write_gnubg_mat(
+            &paths.output_mat,
+            &cfg.engine_a.name,
+            &cfg.engine_b.name,
+            variant,
+            &paths.timestamp,
+            &artifacts.mat_games,
+        )?;
+    }
+
     artifacts.flush()?;
     ui.finish();
 
     let elapsed = run_start.elapsed();
     let (line_engines, line_result, line_rate, line_decide, line_class, line_sides) =
-        render_status_lines(stats.status_view(&cfg.engine_a.name, &cfg.engine_b.name, cfg.games, elapsed));
+        render_status_lines(stats.status_view(
+            &cfg.engine_a.name,
+            &cfg.engine_b.name,
+            cfg.games,
+            elapsed,
+        ));
 
     Ok(RunSummary {
         line_engines,
@@ -134,13 +153,21 @@ pub async fn run_duel(
 }
 
 struct RunArtifacts {
+    save_traces: bool,
+    save_mat: bool,
     trace_dir: std::path::PathBuf,
     csv: Option<BufWriter<fs::File>>,
+    mat_games: Vec<MatGameRecord>,
 }
 
 impl RunArtifacts {
-    fn new(paths: &RunPaths, save_results: bool) -> Result<Self, String> {
-        let csv = if save_results {
+    fn new(
+        paths: &RunPaths,
+        save_csv: bool,
+        save_traces: bool,
+        save_mat: bool,
+    ) -> Result<Self, String> {
+        let csv = if save_csv {
             if let Some(parent) = paths.output_csv.parent() {
                 fs::create_dir_all(parent).map_err(|e| e.to_string())?;
             }
@@ -157,11 +184,16 @@ impl RunArtifacts {
             None
         };
 
-        fs::create_dir_all(&paths.trace_games_dir).map_err(|e| e.to_string())?;
+        if save_traces {
+            fs::create_dir_all(&paths.trace_games_dir).map_err(|e| e.to_string())?;
+        }
 
         Ok(Self {
+            save_traces,
+            save_mat,
             trace_dir: paths.trace_games_dir.clone(),
             csv,
+            mat_games: Vec::new(),
         })
     }
 
@@ -254,33 +286,47 @@ fn process_completed_game(
     let a_is_x = done.a_is_x;
     let result = &done.result;
 
-    let trace_path = artifacts.trace_dir.join(format!("game_{:05}.log", game_idx + 1));
-    let mut trace = String::new();
-    trace.push_str(&format!(
-        "game={} engine_x={} engine_o={} winner={} plies={}\n",
-        game_idx + 1,
-        if a_is_x {
-            &cfg.engine_a.name
-        } else {
-            &cfg.engine_b.name
-        },
-        if a_is_x {
-            &cfg.engine_b.name
-        } else {
-            &cfg.engine_a.name
-        },
-        match result.winner_x {
-            Some(true) => "x",
-            Some(false) => "o",
-            None => "incomplete",
-        },
-        result.plies,
-    ));
-    for line in &result.trace_lines {
-        trace.push_str(line);
-        trace.push('\n');
+    if artifacts.save_traces {
+        let trace_path = artifacts
+            .trace_dir
+            .join(format!("game_{:05}.log", game_idx + 1));
+        let mut trace = String::new();
+        trace.push_str(&format!(
+            "game={} engine_x={} engine_o={} winner={} plies={}\n",
+            game_idx + 1,
+            if a_is_x {
+                &cfg.engine_a.name
+            } else {
+                &cfg.engine_b.name
+            },
+            if a_is_x {
+                &cfg.engine_b.name
+            } else {
+                &cfg.engine_a.name
+            },
+            match result.winner_x {
+                Some(true) => "x",
+                Some(false) => "o",
+                None => "incomplete",
+            },
+            result.plies,
+        ));
+        for line in &result.trace_lines {
+            trace.push_str(line);
+            trace.push('\n');
+        }
+        fs::write(trace_path, trace).map_err(|e| e.to_string())?;
     }
-    fs::write(trace_path, trace).map_err(|e| e.to_string())?;
+
+    if artifacts.save_mat {
+        artifacts.mat_games.push(MatGameRecord {
+            game_idx,
+            a_is_x,
+            winner_x: result.winner_x,
+            points_x: result.points_x,
+            plies: result.plies_data.clone(),
+        });
+    }
 
     debug!(
         game = game_idx + 1,
@@ -365,7 +411,12 @@ fn process_completed_game(
 
     let elapsed = run_start.elapsed();
     let (line_engines, line_result, line_rate, line_decide, line_class, line_sides) =
-        render_status_lines(stats.status_view(&cfg.engine_a.name, &cfg.engine_b.name, done_games, elapsed));
+        render_status_lines(stats.status_view(
+            &cfg.engine_a.name,
+            &cfg.engine_b.name,
+            done_games,
+            elapsed,
+        ));
     ui.update(
         done_games,
         (

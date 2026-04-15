@@ -3,7 +3,7 @@ use std::time::Instant;
 use bkgm::codecs::gnuid;
 use bkgm::dice::Dice;
 use bkgm::dice_gen::{DiceGen, FastrandDice};
-use bkgm::{normalize_move_text, Game, GameState, Variant};
+use bkgm::{Game, GameState, Variant, normalize_move_text};
 
 use crate::engine::EngineProcess;
 
@@ -17,6 +17,15 @@ pub(crate) struct DuelGameResult {
     pub(crate) a_decision_sec: f64,
     pub(crate) b_decision_sec: f64,
     pub(crate) trace_lines: Vec<String>,
+    pub(crate) plies_data: Vec<PlyRecord>,
+}
+
+#[derive(Clone)]
+pub(crate) struct PlyRecord {
+    pub(crate) turn_a: bool,
+    pub(crate) die_1: usize,
+    pub(crate) die_2: usize,
+    pub(crate) move_text: String,
 }
 
 pub(crate) fn seed_for_game(base_seed: u64, game_idx: usize) -> u64 {
@@ -40,6 +49,7 @@ pub(crate) fn play_game(
     let mut a_decision_sec = 0f64;
     let mut b_decision_sec = 0f64;
     let mut trace_lines = Vec::new();
+    let mut plies_data = Vec::new();
 
     for ply in 0..max_plies {
         let dice = if ply == 0 {
@@ -59,6 +69,7 @@ pub(crate) fn play_game(
                 a_decision_sec,
                 b_decision_sec,
                 trace_lines,
+                plies_data,
             });
         }
         let position_id = gnuid::encode(game.position());
@@ -102,6 +113,13 @@ pub(crate) fn play_game(
                 chosen_move_raw, chosen_move
             ));
         }
+
+        plies_data.push(PlyRecord {
+            turn_a: a_to_move,
+            die_1: d1,
+            die_2: d2,
+            move_text: chosen_move.clone(),
+        });
 
         let next = match game.position().apply_move(dice, &chosen_move) {
             Some(pos) => pos,
@@ -160,6 +178,7 @@ pub(crate) fn play_game(
                 a_decision_sec,
                 b_decision_sec,
                 trace_lines,
+                plies_data,
             });
         }
     }
@@ -174,5 +193,6 @@ pub(crate) fn play_game(
         a_decision_sec,
         b_decision_sec,
         trace_lines,
+        plies_data,
     })
 }

@@ -10,6 +10,7 @@ mod duel_messages;
 mod duel_runner;
 mod duel_workers;
 mod engine;
+mod export;
 mod logging;
 mod output_paths;
 mod report;

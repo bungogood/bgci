@@ -3,8 +3,8 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use bgci::engines;
-use serde::de::{self, Deserializer};
 use serde::Deserialize;
+use serde::de::{self, Deserializer};
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(default)]
@@ -17,6 +17,10 @@ pub struct DuelConfig {
     pub variant: String,
     pub log: String,
     pub timeout_secs: Option<u64>,
+    pub output_csv: Option<String>,
+    pub output_mat: Option<String>,
+    pub output_log: Option<String>,
+    pub output_traces_dir: Option<String>,
     pub engine_a: EngineConfig,
     pub engine_b: EngineConfig,
 }
@@ -32,6 +36,10 @@ impl Default for DuelConfig {
             variant: "backgammon".to_string(),
             log: "off".to_string(),
             timeout_secs: None,
+            output_csv: None,
+            output_mat: None,
+            output_log: None,
+            output_traces_dir: None,
             engine_a: EngineConfig::default_a(),
             engine_b: EngineConfig::default_b(),
         }
