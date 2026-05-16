@@ -1,6 +1,6 @@
 use std::time::Duration;
 
-use crate::report::{mean_ci95, StatusView};
+use crate::report::{StatusView, mean_ci95};
 
 pub struct DuelStats {
     a_points: f32,

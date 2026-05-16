@@ -3,7 +3,7 @@ use std::time::Instant;
 use bkgm::codecs::gnuid;
 use bkgm::dice::Dice;
 use bkgm::dice_gen::{DiceGen, FastrandDice};
-use bkgm::{normalize_move_text, Game, GameState, Variant};
+use bkgm::{Game, GameState, Variant, normalize_move_text};
 
 use crate::engine::EngineProcess;
 

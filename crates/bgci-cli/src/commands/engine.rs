@@ -1,8 +1,7 @@
-use bgci::engines;
+use bgci_core::config::{list_engine_alias_details, list_engine_aliases, resolve_engine_reference};
+use bgci_core::engines;
 use clap::Args;
 use std::process::{Command, Stdio};
-
-use crate::config::{list_engine_alias_details, list_engine_aliases, resolve_engine_reference};
 
 #[derive(Debug, Args)]
 pub struct EngineArgs {

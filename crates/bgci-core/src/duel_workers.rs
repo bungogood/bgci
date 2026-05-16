@@ -1,8 +1,8 @@
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
-use bkgm::dice_gen::FastrandDice;
 use bkgm::Variant;
+use bkgm::dice_gen::FastrandDice;
 use tokio::sync::mpsc;
 use tokio::task;
 
@@ -17,13 +17,14 @@ pub struct LocalWorkerSpec {
     pub variant: Variant,
     pub max_plies: usize,
     pub swap_sides: bool,
+    pub mirrored_pairs: bool,
     pub base_seed: u64,
     pub engine_a: EngineConfig,
     pub engine_b: EngineConfig,
     pub cancel: Arc<AtomicBool>,
 }
 
-pub fn spawn_local_workers(spec: LocalWorkerSpec, tx: mpsc::UnboundedSender<WorkerMessage>) {
+pub(crate) fn spawn_local_workers(spec: LocalWorkerSpec, tx: mpsc::UnboundedSender<WorkerMessage>) {
     let worker_count = spec.workers;
     for worker_id in 0..worker_count {
         let tx = tx.clone();
@@ -33,6 +34,7 @@ pub fn spawn_local_workers(spec: LocalWorkerSpec, tx: mpsc::UnboundedSender<Work
         let cancel = spec.cancel.clone();
         let max_plies = spec.max_plies;
         let swap_sides = spec.swap_sides;
+        let mirrored_pairs = spec.mirrored_pairs;
         let base_seed = spec.base_seed;
         let games = spec.games;
 
@@ -52,6 +54,7 @@ pub fn spawn_local_workers(spec: LocalWorkerSpec, tx: mpsc::UnboundedSender<Work
             let mut engine_b = match EngineProcess::spawn(&engine_b_cfg) {
                 Ok(e) => e,
                 Err(err) => {
+                    engine_a.quit();
                     let _ = tx.send(WorkerMessage::Error(format!(
                         "worker {} failed to spawn engine B: {}",
                         worker_id + 1,
@@ -107,7 +110,12 @@ pub fn spawn_local_workers(spec: LocalWorkerSpec, tx: mpsc::UnboundedSender<Work
                     break;
                 }
 
-                let mut dice_gen = FastrandDice::with_seed(seed_for_game(base_seed, game_idx));
+                let seed_idx = if mirrored_pairs {
+                    game_idx / 2
+                } else {
+                    game_idx
+                };
+                let mut dice_gen = FastrandDice::with_seed(seed_for_game(base_seed, seed_idx));
                 match play_game(
                     worker_variant,
                     max_plies,

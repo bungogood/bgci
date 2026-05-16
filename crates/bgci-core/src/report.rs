@@ -111,11 +111,7 @@ fn ratio_pct(count: usize, total: usize) -> f64 {
 }
 
 fn per_game(sum: f32, n: usize) -> f64 {
-    if n == 0 {
-        0.0
-    } else {
-        sum as f64 / n as f64
-    }
+    if n == 0 { 0.0 } else { sum as f64 / n as f64 }
 }
 
 fn fmt_duration_short(d: Duration) -> String {

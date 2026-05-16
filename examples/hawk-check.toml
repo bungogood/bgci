@@ -1,0 +1,10 @@
+variant = "backgammon"
+games = 2
+
+[engine_a]
+name = "hawk"
+command = ["/Users/jonathan/projects/backgammon/hawk/target/debug/ubgi-engine", "--checkpoint", "/Users/jonathan/projects/backgammon/hawk/models/hawk_v0_0ply.safetensors"]
+
+[engine_b]
+name = "random"
+engine = "random"
