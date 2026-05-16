@@ -97,7 +97,7 @@ impl EngineProcess {
     }
 
     fn try_set_option(&mut self, name: &str, value: &str) -> Result<(), String> {
-        self.send(&format!("setoption name {name} value {value}"))?;
+        self.send(&format!("set {name} {value}"))?;
         self.send("isready")?;
         loop {
             let line = self.read_line()?;
@@ -106,10 +106,10 @@ impl EngineProcess {
             }
             if line.starts_with("error ") {
                 eprintln!(
-                    "warning: engine '{}' rejected setoption {}={}; continuing",
+                    "warning: engine '{}' rejected set {}={}; continuing",
                     self.name, name, value
                 );
-                debug!(option = %name, value = %value, response = %line, "engine rejected optional setoption");
+                debug!(option = %name, value = %value, response = %line, "engine rejected optional set");
                 return Ok(());
             }
         }
@@ -123,9 +123,6 @@ impl EngineProcess {
             if line == "readyok" {
                 break;
             }
-            if line.starts_with("error unknown_command") {
-                continue;
-            }
             if line.starts_with("error ") {
                 return Err(format!("engine error: {line}"));
             }
@@ -138,10 +135,7 @@ impl EngineProcess {
             return Ok(());
         }
         info!(variant = %variant_name(variant), "set engine variant");
-        self.send(&format!(
-            "setoption name Variant value {}",
-            variant_name(variant)
-        ))?;
+        self.send(&format!("set game.variant {}", variant_name(variant)))?;
         self.send("isready")?;
         loop {
             let line = self.read_line()?;
@@ -166,7 +160,7 @@ impl EngineProcess {
         };
         self.send(&format!("position gnubgid {position_id}"))?;
         self.send(&format!("dice {d1} {d2}"))?;
-        self.send("go role chequer")?;
+        self.send("go chequer")?;
         loop {
             let line = self.read_line()?;
             if let Some(mv) = line.strip_prefix("bestmove ") {
@@ -178,9 +172,6 @@ impl EngineProcess {
                 return Err(format!("engine returned unexpected best* response: {line}"));
             }
             if line.starts_with("error ") {
-                if line.starts_with("error unknown_command") {
-                    continue;
-                }
                 error!(response = %line, "engine protocol error");
                 return Err(format!("engine error: {line}"));
             }

@@ -2,7 +2,7 @@ use bgci_core::checker::run_check;
 use bgci_core::common::parse_variant;
 use bgci_core::config::EngineConfig;
 use bgci_core::config::{
-    DuelConfig, load_toml, resolve_engine_reference, resolve_engine_shortcuts,
+    load_toml, resolve_engine_reference, resolve_engine_shortcuts, DuelConfig,
 };
 use clap::Args;
 
@@ -63,7 +63,7 @@ fn run_single(
         }
         engine_cfg
             .options
-            .insert("Ply".to_string(), ply.to_string());
+            .insert("engine.ply".to_string(), ply.to_string());
     }
 
     let variant_name = variant_override.unwrap_or(default_variant);
@@ -80,7 +80,7 @@ fn run_single(
         }
     }
     if !report.options.is_empty() {
-        println!("options:");
+        println!("keys:");
         for line in &report.options {
             println!("  {line}");
         }
@@ -95,6 +95,10 @@ fn run_single(
     println!(
         "notation: bar={} off={} numeric_alias_seen={}",
         report.bar_notation_ok, report.off_notation_ok, report.numeric_bar_off_alias_seen,
+    );
+    println!(
+        "awkward_legal_probes_passed: {}",
+        report.awkward_legal_probes_passed
     );
     if let Some(raw) = &report.bestmove_raw {
         println!("bestmove raw: {raw}");

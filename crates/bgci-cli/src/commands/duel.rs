@@ -220,7 +220,7 @@ fn build_duel_config(args: &DuelArgs) -> Result<DuelConfig, String> {
         }
         cfg.engine_a
             .options
-            .insert("Ply".to_string(), ply.to_string());
+            .insert("engine.ply".to_string(), ply.to_string());
     }
     if let Some(ply) = ply_b {
         if ply < 1 {
@@ -228,7 +228,7 @@ fn build_duel_config(args: &DuelArgs) -> Result<DuelConfig, String> {
         }
         cfg.engine_b
             .options
-            .insert("Ply".to_string(), ply.to_string());
+            .insert("engine.ply".to_string(), ply.to_string());
     }
 
     Ok(cfg)

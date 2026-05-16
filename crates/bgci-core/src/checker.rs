@@ -19,7 +19,21 @@ pub struct CheckReport {
     pub bar_notation_ok: bool,
     pub off_notation_ok: bool,
     pub numeric_bar_off_alias_seen: bool,
+    pub awkward_legal_probes_passed: usize,
     pub errors: Vec<String>,
+}
+
+#[derive(Clone, Copy)]
+enum ProbeExpectation {
+    Token(&'static str),
+    LegalChild,
+}
+
+struct ProbeSpec {
+    phase: &'static str,
+    position_id: &'static str,
+    dice: Dice,
+    expect: ProbeExpectation,
 }
 
 impl CheckReport {
@@ -48,6 +62,7 @@ pub fn run_check(engine_cfg: &EngineConfig, variant: Variant) -> Result<CheckRep
         bar_notation_ok: false,
         off_notation_ok: false,
         numeric_bar_off_alias_seen: false,
+        awkward_legal_probes_passed: 0,
         errors: Vec::new(),
     };
 
@@ -61,7 +76,7 @@ pub fn run_check(engine_cfg: &EngineConfig, variant: Variant) -> Result<CheckRep
             report.ids.push(line);
             continue;
         }
-        if line.starts_with("option ") {
+        if line.starts_with("key ") {
             report.options.push(line);
             continue;
         }
@@ -75,22 +90,18 @@ pub fn run_check(engine_cfg: &EngineConfig, variant: Variant) -> Result<CheckRep
     wait_readyok(&mut engine, &mut report.errors, "isready");
 
     for (name, value) in &engine_cfg.options {
-        engine.send_command(&format!("setoption name {name} value {value}"))?;
+        engine.send_command(&format!("set {name} {value}"))?;
         engine.send_command("isready")?;
-        let _ = wait_readyok_optional(
-            &mut engine,
-            &mut report.errors,
-            &format!("setoption {name}"),
-        );
+        let _ = wait_readyok_optional(&mut engine, &mut report.errors, &format!("set {name}"));
     }
 
     engine.send_command("newgame")?;
     engine.send_command("isready")?;
     report.supports_newgame = wait_readyok(&mut engine, &mut report.errors, "newgame");
 
-    engine.send_command("setoption name Variant value backgammon")?;
+    engine.send_command("set game.variant backgammon")?;
     engine.send_command("isready")?;
-    let _ = wait_readyok(&mut engine, &mut report.errors, "setoption Variant");
+    let _ = wait_readyok(&mut engine, &mut report.errors, "set game.variant");
 
     let game = Game::new(variant);
     let start_id = gnuid::encode(game.position());
@@ -109,7 +120,7 @@ pub fn run_check(engine_cfg: &EngineConfig, variant: Variant) -> Result<CheckRep
         .collect();
     report.legal_preview = legal_moves.iter().take(8).map(|m| m.0.clone()).collect();
 
-    engine.send_command("go role chequer")?;
+    engine.send_command("go chequer")?;
     loop {
         let line = engine.read_response()?;
         if let Some(mv) = line.strip_prefix("bestmove ") {
@@ -123,52 +134,150 @@ pub fn run_check(engine_cfg: &EngineConfig, variant: Variant) -> Result<CheckRep
                     match applied {
                         Some(next) if legal_ids.iter().any(|id| id == &gnuid::encode(next)) => {}
                         _ => report.errors.push(format!(
-                            "go role chequer: illegal bestmove '{}' (canonical '{}')",
+                            "go chequer: illegal bestmove '{}' (canonical '{}')",
                             mv.trim(),
                             c
                         )),
                     }
                 }
-                None => report.errors.push(format!(
-                    "go role chequer: unparsable bestmove '{}'",
-                    mv.trim()
-                )),
+                None => report
+                    .errors
+                    .push(format!("go chequer: unparsable bestmove '{}'", mv.trim())),
             }
             break;
         }
         if line.starts_with("best") {
             report.errors.push(format!(
-                "go role chequer: expected bestmove payload, got '{line}'"
+                "go chequer: expected bestmove payload, got '{line}'"
             ));
             break;
         }
         if line.starts_with("error ") {
-            report.errors.push(format!("go role chequer: {line}"));
+            report.errors.push(format!("go chequer: {line}"));
             break;
         }
     }
 
-    apply_notation_probe(
-        &mut report,
-        &mut engine,
-        variant,
-        "Np7BQSCYZ/AAWA",
-        Dice::new(5, 3),
-        "bar-notation probe",
-        "bar",
-    );
-    apply_notation_probe(
-        &mut report,
-        &mut engine,
-        variant,
-        "/z0AADDeaxsAAA",
-        Dice::new(5, 5),
-        "off-notation probe",
-        "off",
-    );
+    let probes = [
+        ProbeSpec {
+            phase: "bar-notation probe",
+            position_id: "Np7BQSCYZ/AAWA",
+            dice: Dice::new(5, 3),
+            expect: ProbeExpectation::Token("bar"),
+        },
+        ProbeSpec {
+            phase: "off-notation probe",
+            position_id: "/z0AADDeaxsAAA",
+            dice: Dice::new(5, 5),
+            expect: ProbeExpectation::Token("off"),
+        },
+        ProbeSpec {
+            phase: "awkward-legal probe: bearoff must use both dice",
+            position_id: "t02oASACAAAAAA",
+            dice: Dice::new(5, 1),
+            expect: ProbeExpectation::LegalChild,
+        },
+    ];
+
+    for probe in probes {
+        run_probe(&mut report, &mut engine, variant, &probe);
+    }
 
     engine.quit();
     Ok(report)
+}
+
+fn run_probe(
+    report: &mut CheckReport,
+    engine: &mut EngineProcess,
+    variant: Variant,
+    probe: &ProbeSpec,
+) {
+    let position_id = probe.position_id;
+    let dice = probe.dice;
+    let phase = probe.phase;
+
+    let Some(position) = gnuid::decode(variant, position_id) else {
+        report.errors.push(format!(
+            "{phase}: invalid probe position id '{position_id}'"
+        ));
+        return;
+    };
+
+    let mut game = Game::new(variant);
+    if let Err(err) = game.set_position(position) {
+        report
+            .errors
+            .push(format!("{phase}: failed to set probe position: {err}"));
+        return;
+    }
+
+    let legal_ids: Vec<String> = match game.legal_positions(&dice) {
+        positions if !positions.is_empty() => positions.iter().map(|p| gnuid::encode(*p)).collect(),
+        _ => {
+            report.errors.push(format!("{phase}: no legal positions"));
+            return;
+        }
+    };
+
+    let Some(mv_raw) = probe_move_notation(
+        engine,
+        variant,
+        position_id,
+        dice,
+        phase,
+        &mut report.errors,
+    ) else {
+        return;
+    };
+
+    if contains_numeric_bar_off_alias(&mv_raw) {
+        report.numeric_bar_off_alias_seen = true;
+        report
+            .errors
+            .push(format!("{phase}: numeric alias in bestmove '{mv_raw}'"));
+    }
+
+    match probe.expect {
+        ProbeExpectation::Token(expected_token) => {
+            let has_expected = contains_token(&mv_raw, expected_token);
+            if expected_token.eq_ignore_ascii_case("bar") {
+                report.bar_notation_ok = has_expected;
+            } else if expected_token.eq_ignore_ascii_case("off") {
+                report.off_notation_ok = has_expected;
+            }
+            if !has_expected {
+                report.errors.push(format!(
+                    "{phase}: expected '{expected_token}' token in bestmove '{mv_raw}'"
+                ));
+            }
+        }
+        ProbeExpectation::LegalChild => {
+            let Some(canonical) = normalize_move_text(&mv_raw) else {
+                report
+                    .errors
+                    .push(format!("{phase}: unparsable bestmove '{mv_raw}'"));
+                return;
+            };
+
+            let Some(next) = game.position().apply_move(dice, &canonical) else {
+                report.errors.push(format!(
+                    "{phase}: bestmove not applicable '{}' (canonical '{}')",
+                    mv_raw, canonical
+                ));
+                return;
+            };
+
+            let next_id = gnuid::encode(next);
+            if legal_ids.iter().any(|id| id == &next_id) {
+                report.awkward_legal_probes_passed += 1;
+            } else {
+                report.errors.push(format!(
+                    "{phase}: engine returned move not in legal children (pos={position_id} dice={dice} choice_raw={mv_raw} choice={canonical})"
+                ));
+            }
+        }
+    }
 }
 
 fn probe_move_notation(
@@ -215,7 +324,7 @@ fn probe_move_notation(
         errors.push(format!("{phase}: {err}"));
         return None;
     }
-    if let Err(err) = engine.send_command("go role chequer") {
+    if let Err(err) = engine.send_command("go chequer") {
         errors.push(format!("{phase}: {err}"));
         return None;
     }
@@ -240,48 +349,6 @@ fn probe_move_notation(
                 return None;
             }
         }
-    }
-}
-
-fn apply_notation_probe(
-    report: &mut CheckReport,
-    engine: &mut EngineProcess,
-    variant: Variant,
-    position_id: &str,
-    dice: Dice,
-    phase: &str,
-    expected_token: &str,
-) {
-    let probed = probe_move_notation(
-        engine,
-        variant,
-        position_id,
-        dice,
-        phase,
-        &mut report.errors,
-    );
-    let Some(raw) = probed else {
-        return;
-    };
-
-    if contains_numeric_bar_off_alias(&raw) {
-        report.numeric_bar_off_alias_seen = true;
-        report
-            .errors
-            .push(format!("{phase}: numeric alias in bestmove '{raw}'"));
-    }
-
-    let has_expected = contains_token(&raw, expected_token);
-    if expected_token.eq_ignore_ascii_case("bar") {
-        report.bar_notation_ok = has_expected;
-    } else if expected_token.eq_ignore_ascii_case("off") {
-        report.off_notation_ok = has_expected;
-    }
-
-    if !has_expected {
-        report.errors.push(format!(
-            "{phase}: expected '{expected_token}' token in bestmove '{raw}'"
-        ));
     }
 }
 
