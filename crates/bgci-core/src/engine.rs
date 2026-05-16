@@ -5,6 +5,7 @@ use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
 use std::thread;
 
 use crate::common::variant_name;
+use crate::ubgi;
 use bkgm::dice::Dice;
 use bkgm::Variant;
 use tracing::{debug, error, info};
@@ -12,7 +13,6 @@ use tracing::{debug, error, info};
 use crate::config::EngineConfig;
 
 pub struct EngineProcess {
-    name: String,
     child: Child,
     stdin: ChildStdin,
     stdout: BufReader<ChildStdout>,
@@ -72,7 +72,6 @@ impl EngineProcess {
             });
         }
         Ok(Self {
-            name: config.name.clone(),
             child,
             stdin,
             stdout: BufReader::new(stdout),
@@ -86,29 +85,25 @@ impl EngineProcess {
 
     pub fn init_ubgi(&mut self) -> Result<(), String> {
         info!("ubgi handshake start");
-        self.send("ubgi")?;
+        self.send(ubgi::CMD_UBGI)?;
         self.read_until(|l| l == "ubgiok" || l == "readyok")?;
         for (name, value) in self.options.clone() {
             self.try_set_option(&name, &value)?;
         }
-        self.send("isready")?;
+        self.send(ubgi::CMD_ISREADY)?;
         self.read_until(|l| l == "readyok")?;
         Ok(())
     }
 
     fn try_set_option(&mut self, name: &str, value: &str) -> Result<(), String> {
         self.send(&format!("set {name} {value}"))?;
-        self.send("isready")?;
+        self.send(ubgi::CMD_ISREADY)?;
         loop {
             let line = self.read_line()?;
             if line == "readyok" {
                 return Ok(());
             }
             if line.starts_with("error ") {
-                eprintln!(
-                    "warning: engine '{}' rejected set {}={}; continuing",
-                    self.name, name, value
-                );
                 debug!(option = %name, value = %value, response = %line, "engine rejected optional set");
                 return Ok(());
             }
@@ -116,8 +111,8 @@ impl EngineProcess {
     }
 
     pub fn new_game(&mut self) -> Result<(), String> {
-        self.send("newgame")?;
-        self.send("isready")?;
+        self.send(ubgi::CMD_NEWGAME)?;
+        self.send(ubgi::CMD_ISREADY)?;
         loop {
             let line = self.read_line()?;
             if line == "readyok" {
@@ -136,7 +131,7 @@ impl EngineProcess {
         }
         info!(variant = %variant_name(variant), "set engine variant");
         self.send(&format!("set game.variant {}", variant_name(variant)))?;
-        self.send("isready")?;
+        self.send(ubgi::CMD_ISREADY)?;
         loop {
             let line = self.read_line()?;
             if line == "readyok" {
@@ -154,13 +149,9 @@ impl EngineProcess {
         dice: Dice,
         _x_to_move: bool,
     ) -> Result<String, String> {
-        let (d1, d2) = match dice {
-            Dice::Double(d) => (d, d),
-            Dice::Mixed(m) => (m.big(), m.small()),
-        };
-        self.send(&format!("position gnubgid {position_id}"))?;
-        self.send(&format!("dice {d1} {d2}"))?;
-        self.send("go chequer")?;
+        self.send(&ubgi::cmd_position_gnubgid(position_id))?;
+        self.send(&ubgi::cmd_dice(dice))?;
+        self.send(ubgi::CMD_GO_CHEQUER)?;
         loop {
             let line = self.read_line()?;
             if let Some(mv) = line.strip_prefix("bestmove ") {
@@ -179,7 +170,7 @@ impl EngineProcess {
     }
 
     pub fn quit(&mut self) {
-        let _ = self.send("quit");
+        let _ = self.send(ubgi::CMD_QUIT);
         self.reap_child();
     }
 
