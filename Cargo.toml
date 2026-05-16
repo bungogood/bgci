@@ -1,19 +1,8 @@
-[package]
-name = "bgci"
-version = "0.1.0"
-edition = "2024"
-default-run = "bgci"
-
-[dependencies]
-bkgm = { path = "../bkgm" }
-clap = { version = "4.5", features = ["derive"] }
-fastrand = "2.3.0"
-indicatif = "0.17"
-serde = { version = "1.0", features = ["derive"] }
-toml = "0.8"
-shellexpand = "3.1"
-time = { version = "0.3", features = ["local-offset"] }
-tracing = "0.1"
-tracing-appender = "0.2"
-tracing-subscriber = { version = "0.3", features = ["env-filter"] }
-tokio = { version = "1", features = ["macros", "rt-multi-thread", "sync", "time"] }
+[workspace]
+members = [
+  "crates/bgci-core",
+  "crates/bgci-cli",
+  "crates/bgci-ratings",
+]
+default-members = ["crates/bgci-cli"]
+resolver = "2"
