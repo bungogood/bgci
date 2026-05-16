@@ -9,8 +9,15 @@
 Clone the repo and run:
 
 ```bash
-cargo install --path .
+cargo install --path crates/bgci-cli
 ```
+
+Workspace layout:
+
+- `crates/bgci-core`: engine protocol, duel runner, game execution primitives
+- `crates/bgci-cli`: `bgci` command-line frontend (`duel`, `check`, `engine`)
+- `crates/bgci-ratings`: ratings DB + ingest + leaderboard + pairing scheduler
+- `crates/bgci-ratings`: rating runner/orchestrator (`run`)
 
 ## Quick Start
 
@@ -58,6 +65,42 @@ bgci check --config examples/pubeval-vs-random.toml
 # check one side from config
 bgci check --config examples/pubeval-vs-random.toml a
 bgci check --config examples/pubeval-vs-random.toml b
+
+# record duel results into sqlite
+bgci duel --engine-a pubeval --engine-b random --games 200 --record --db data/eval.db
+
+# default DB path follows XDG:
+# $XDG_DATA_HOME/bgci/eval.db (or ~/.local/share/bgci/eval.db)
+
+# run an Elo search directly from an engine pool
+bgci ratings --engines gnubg wildbg tabula pubeval --budget-games 2000 --pair-games 40 --parallel 8
+
+# periodically replay all raw ratings games from DB for global refit
+bgci ratings --engines gnubg wildbg tabula pubeval --budget-games 20000 --pair-games 200 --refit-every-games 4000
+
+# enforce minimum pair coverage before pure information-gain scheduling
+bgci ratings --engines gnubg wildbg tabula pubeval --budget-games 20000 --pair-games 200 --min-pair-games 400
+
+# resume ratings state from DB (default DB follows XDG data path)
+bgci ratings --engines gnubg wildbg tabula pubeval --budget-games 10000
+
+# reset ratings state before running
+bgci ratings --engines gnubg wildbg tabula pubeval --budget-games 2000 --reset
+
+# show persisted leaderboard without running new games
+bgci ratings --leaderboard
+
+# run with a simple live terminal dashboard
+bgci ratings --engines gnubg wildbg tabula pubeval --budget-games 2000 --pair-games 40 --parallel 4 --tui
+
+# estimate rating of a candidate engine against rated pool (does not modify pool ratings)
+bgci eval --engine hawk1 --budget-games 2000 --pair-games 200
+
+# restrict eval to specific opponents from the ratings DB
+bgci eval --engine hawk1 --opponents wildbg hureval pubeval --budget-games 2000
+
+# equivalent standalone binary
+bgci-ratings run --engines gnubg wildbg tabula pubeval --budget-games 2000 --pair-games 40 --parallel 8
 ```
 
 ## UBGI Protocol
@@ -67,7 +110,7 @@ engine communication.
 
 Primary reference for this project:
 
-- `docs/ubgi-v0.1-spec.md`
+- `docs/ubgi-v0.2-spec.md`
 
 ## References
 
