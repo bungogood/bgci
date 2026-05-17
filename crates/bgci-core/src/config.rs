@@ -150,7 +150,7 @@ pub fn resolve_engine_reference(alias: &str) -> Result<EngineConfig, String> {
 }
 
 pub fn resolve_engine_spec(spec: &str) -> Result<(String, EngineConfig), String> {
-    let parsed = parse_engine_spec(spec)?;
+    let parsed = parse_engine_spec(spec).map_err(|err| err.to_string())?;
 
     let (engine_ref, resolved_version) =
         resolve_engine_ref_for_spec(&parsed.alias, parsed.version.as_deref())?;
@@ -173,7 +173,7 @@ pub fn engine_identity_from_spec_with_options(
     spec: &str,
     effective_options: &BTreeMap<String, String>,
 ) -> Result<String, String> {
-    let parsed = parse_engine_spec(spec)?;
+    let parsed = parse_engine_spec(spec).map_err(|err| err.to_string())?;
     let (engine_ref, resolved_version) =
         resolve_engine_ref_for_spec(&parsed.alias, parsed.version.as_deref())?;
     let base = resolve_engine_reference(&engine_ref)?;

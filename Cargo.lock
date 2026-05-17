@@ -132,6 +132,7 @@ dependencies = [
  "base64",
  "fastrand",
  "mimalloc",
+ "thiserror",
 ]
 
 [[package]]
