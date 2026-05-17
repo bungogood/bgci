@@ -74,15 +74,32 @@ Key naming convention:
 
 ### Key Discovery and Values
 
-- `key <name> <type> <domain> <default> [description...]`
+- `key <name> int [<min>..<max>] <default> [! ] [description...]`
+- `key <name> bool <default> [! ] [description...]`
+- `key <name> enum <a|b|...> <default> [! ] [description...]`
+- `key <name> string * <default> [! ] [description...]`
 - `value <name> <value>`
 
-Type and domain examples:
+`!` is an optional minor-option marker declared by the engine.
 
-- `int 1..4`
-- `bool true|false`
-- `enum backgammon|nackgammon|hypergammon`
-- `string *`
+- when `!` is present, the option is minor (controllers should usually exclude it from rating identity keys)
+- when `!` is absent, the option is key-relevant by default
+
+`!` is only valid as the standalone token immediately after `<default>`.
+
+Type examples:
+
+- `int 1..4 1`
+- `int 42`
+- `bool true`
+- `enum backgammon|nackgammon|hypergammon backgammon`
+- `string * default-value`
+
+Examples:
+
+- `key engine.ply int 1..4 1 search depth`
+- `key engine.threads int 1..64 8 ! worker threads`
+- `key engine.seed int * 42 ! rng seed`
 
 ### Optional Info
 
