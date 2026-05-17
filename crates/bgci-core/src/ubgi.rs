@@ -1,4 +1,5 @@
 use bkgm::dice::Dice;
+use bkgm::ubgi::KeyLineSpec;
 
 pub const CMD_UBGI: &str = "ubgi";
 pub const CMD_ISREADY: &str = "isready";
@@ -24,7 +25,7 @@ pub fn cmd_dice(dice: Dice) -> String {
 
 pub enum LineKind<'a> {
     Id,
-    Key,
+    Key(KeyLineSpec),
     ReadyOk,
     UbgiOk,
     BestMove(&'a str),
@@ -43,8 +44,8 @@ pub fn classify_line(line: &str) -> LineKind<'_> {
     if line.starts_with("id ") {
         return LineKind::Id;
     }
-    if line.starts_with("key ") {
-        return LineKind::Key;
+    if let Some(spec) = bkgm::ubgi::parse_key_line(line) {
+        return LineKind::Key(spec);
     }
     if let Some(mv) = line.strip_prefix("bestmove ") {
         return LineKind::BestMove(mv.trim());

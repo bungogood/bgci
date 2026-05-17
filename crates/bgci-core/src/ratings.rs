@@ -10,20 +10,24 @@ use tokio::time::{Duration, sleep};
 use tracing::{info, warn};
 
 use crate::common::parse_variant;
-use crate::config::{DuelConfig, EngineConfig, resolve_engine_reference};
+use crate::config::{DuelConfig, EngineConfig, resolve_engine_reference, resolve_engine_spec};
 use crate::duel_runner::run_duel;
+use crate::engine::filter_supported_engine_options;
 use crate::output_paths::RunPaths;
 
 #[derive(Debug, Clone, Args)]
 pub struct RunRatingsArgs {
-    #[arg(long, num_args = 2..)]
+    #[arg(long, num_args = 1..)]
     pub engines: Vec<String>,
 
-    #[arg(long)]
-    pub leaderboard: bool,
+    #[arg(long, alias = "leaderboard")]
+    pub show: bool,
 
     #[arg(long)]
     pub reset: bool,
+
+    #[arg(long)]
+    pub reset_all: bool,
 
     #[arg(long = "db")]
     pub db_path: Option<String>,
@@ -136,8 +140,14 @@ pub async fn run_ratings(args: RunRatingsArgs) -> Result<(), String> {
     let mut conn = open_ratings_db(&db_path)?;
     init_ratings_schema(&conn)?;
 
-    if args.leaderboard {
+    if args.show {
         return show_leaderboard(&conn);
+    }
+
+    if args.reset_all {
+        reset_ratings_state(&conn)?;
+        println!("ratings DB reset: {}", db_path);
+        return Ok(());
     }
 
     if args.budget_games == 0 {
@@ -147,13 +157,13 @@ pub async fn run_ratings(args: RunRatingsArgs) -> Result<(), String> {
         return Err("--pair-games must be > 0".to_string());
     }
 
-    let mut unique = Vec::new();
-    for name in &args.engines {
-        if !unique.iter().any(|e: &String| e.eq_ignore_ascii_case(name)) {
-            unique.push(name.clone());
+    let mut unique_specs = Vec::new();
+    for spec in &args.engines {
+        if !unique_specs.iter().any(|e: &String| e.eq_ignore_ascii_case(spec)) {
+            unique_specs.push(spec.clone());
         }
     }
-    if unique.len() < 2 {
+    if unique_specs.len() < 2 {
         return Err("need at least two distinct engines".to_string());
     }
 
@@ -163,12 +173,22 @@ pub async fn run_ratings(args: RunRatingsArgs) -> Result<(), String> {
 
     let variant = parse_variant(&args.variant)?;
     let mut configs: HashMap<String, EngineConfig> = HashMap::new();
-    for name in &unique {
-        let cfg = resolve_engine_reference(name)?;
-        configs.insert(name.clone(), cfg);
+    let mut keys = Vec::new();
+    for spec in &unique_specs {
+        let (key, mut cfg) = resolve_engine_spec(spec)?;
+        if configs.contains_key(&key) {
+            continue;
+        }
+        cfg = filter_supported_engine_options(&cfg);
+        cfg.name = key.clone();
+        keys.push(key.clone());
+        configs.insert(key, cfg);
+    }
+    if keys.len() < 2 {
+        return Err("need at least two distinct engines".to_string());
     }
 
-    let mut ratings = load_or_init_ratings(&conn, &unique)?;
+    let mut ratings = load_or_init_ratings(&conn, &keys)?;
     ratings = refit_ratings_from_raw_ordinal(&conn, &ratings)?;
     let index: HashMap<&str, usize> = ratings
         .iter()
@@ -968,21 +988,22 @@ fn show_leaderboard(conn: &Connection) -> Result<(), String> {
     let mut ratings = load_ratings_rows(conn)?;
     ratings.sort_by(|a, b| b.rating.partial_cmp(&a.rating).unwrap_or(Ordering::Equal));
     if ratings.is_empty() {
-        info!("leaderboard is empty; run `bgci ratings --engines ...` first");
+        println!("leaderboard is empty; run `bgci ratings --engines ...` first");
         return Ok(());
     }
 
-    info!(engines = ratings.len(), "leaderboard");
+    println!("bgci ratings");
+    println!("engines: {}", ratings.len());
+    println!("rank engine                               rating    cons      rd    games");
     for (idx, r) in ratings.iter().enumerate() {
-        info!(
-            rank = idx + 1,
-            engine = %r.name,
-            rating = r.rating,
-            conservative = r.conservative(),
-            games = r.games,
-            uncertainty = r.rd,
-            volatility = r.volatility,
-            "rating"
+        println!(
+            "{:>4} {:<36} {:>8.1} {:>8.1} {:>7.1} {:>7}",
+            idx + 1,
+            r.name,
+            r.rating,
+            r.conservative(),
+            r.rd,
+            r.games,
         );
     }
     Ok(())
@@ -1618,6 +1639,11 @@ fn engine_signature(cfg: &EngineConfig) -> String {
     envs.sort_by(|a, b| a.0.cmp(b.0));
     for (k, v) in envs {
         parts.push(format!("env:{k}={v}"));
+    }
+    let mut opts: Vec<(&String, &String)> = cfg.options.iter().collect();
+    opts.sort_by(|a, b| a.0.cmp(b.0));
+    for (k, v) in opts {
+        parts.push(format!("opt:{k}={v}"));
     }
     parts.join("\u{1e}")
 }

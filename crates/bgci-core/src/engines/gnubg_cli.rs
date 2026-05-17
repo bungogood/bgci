@@ -6,7 +6,7 @@ use bkgm::codecs::gnuid;
 use bkgm::dice::Dice;
 use bkgm::Game;
 
-use super::runtime::{run_ubgi_stdio, UbgiEngine};
+use super::runtime::{parse_ubgi_move, run_ubgi_stdio, UbgiEngine, UbgiError, UbgiMove};
 
 struct GnubgSession {
     child: Child,
@@ -129,7 +129,7 @@ impl UbgiEngine for GnubgCliAdapter {
         "0.3"
     }
 
-    fn on_ready(&mut self) -> Result<(), String> {
+    fn on_ready(&mut self) -> Result<(), UbgiError> {
         let _ = ensure_session(
             &mut self.session,
             &self.gnubg_bin,
@@ -138,10 +138,10 @@ impl UbgiEngine for GnubgCliAdapter {
         Ok(())
     }
 
-    fn choose_move(&mut self, game: &Game, dice: Dice) -> Result<String, String> {
+    fn choose_move(&mut self, game: &Game, dice: Dice) -> Result<UbgiMove, UbgiError> {
         let legal = game.legal_positions(&dice);
         if legal.is_empty() {
-            return Err("missing_context legal_moves".to_string());
+            return Err(UbgiError::bad_state("missing_context legal_moves"));
         }
         let legal_moves = game
             .position()
@@ -161,7 +161,7 @@ impl UbgiEngine for GnubgCliAdapter {
             .map(|(_, pos)| gnuid::encode(*pos))
             .collect();
         if encodable_ids.is_empty() {
-            return Err("move_encode no_encodable_legal_moves".to_string());
+            return Err(UbgiError::bad_state("move_encode no_encodable_legal_moves"));
         }
         let x_to_move = game.position().turn();
         let child_x_to_move = !x_to_move;
@@ -179,7 +179,7 @@ impl UbgiEngine for GnubgCliAdapter {
             .find(|(_, pos)| gnuid::encode(*pos) == chosen_pid)
             .map(|(mv, _)| mv)
             .ok_or_else(|| "move_encode selected_child_not_encodable".to_string())?;
-        Ok(mv.to_string())
+        parse_ubgi_move(mv)
     }
 }
 

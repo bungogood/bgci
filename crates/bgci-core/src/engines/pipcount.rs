@@ -1,7 +1,7 @@
 use bkgm::dice::Dice;
-use bkgm::{Game, State, VariantPosition};
+use bkgm::{encode_move_steps, Game, State, VariantPosition};
 
-use super::runtime::{run_ubgi_stdio, UbgiEngine};
+use super::runtime::{run_ubgi_stdio, UbgiEngine, UbgiError, UbgiMove};
 
 pub fn run(_args: &[String]) -> Result<(), String> {
     let mut adapter = PipcountAdapter;
@@ -20,10 +20,10 @@ impl UbgiEngine for PipcountAdapter {
         "0.1"
     }
 
-    fn choose_move(&mut self, game: &Game, dice: Dice) -> Result<String, String> {
+    fn choose_move(&mut self, game: &Game, dice: Dice) -> Result<UbgiMove, UbgiError> {
         let legal_positions = game.legal_positions(&dice);
         if legal_positions.is_empty() {
-            return Err("no_encodable_legal_moves".to_string());
+            return Err(UbgiError::bad_state("no_encodable_legal_moves"));
         }
 
         let mut best_idx = 0usize;
@@ -36,9 +36,8 @@ impl UbgiEngine for PipcountAdapter {
             }
         }
 
-        game.position()
-            .encode_move(legal_positions[best_idx], dice)
-            .map_err(|err| format!("move_encode {err}"))
+        encode_move_steps(game.position(), legal_positions[best_idx], dice)
+            .map_err(|err| UbgiError::bad_state(format!("move_encode {err}")))
     }
 }
 

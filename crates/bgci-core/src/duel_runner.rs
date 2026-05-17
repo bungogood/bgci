@@ -1,7 +1,5 @@
 use std::fs;
 use std::io::{BufWriter, Write};
-use std::collections::BTreeMap;
-use std::collections::HashSet;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Instant;
@@ -12,13 +10,12 @@ use tokio::sync::mpsc;
 use tokio::time::{Duration, Instant as TokioInstant, sleep_until};
 use tracing::debug;
 
-use crate::config::{DuelConfig, EngineConfig};
+use crate::config::DuelConfig;
 use crate::duel_messages::{CompletedGame, WorkerMessage};
 use crate::duel_workers::{LocalWorkerSpec, spawn_local_workers};
 use crate::output_paths::RunPaths;
 use crate::report::render_status_lines;
 use crate::stats::{DuelStats, GameUpdate};
-use crate::engine::EngineProcess;
 
 pub struct RunSummary {
     pub line_engines: String,
@@ -35,10 +32,8 @@ pub async fn run_duel(
     paths: &RunPaths,
     save_results: bool,
 ) -> Result<RunSummary, String> {
-    let engine_a_cfg = filter_supported_engine_options(&cfg.engine_a);
-    let engine_b_cfg = filter_supported_engine_options(&cfg.engine_b);
-    let engine_a_label = format_engine_label(&engine_a_cfg.name, &engine_a_cfg.options);
-    let engine_b_label = format_engine_label(&engine_b_cfg.name, &engine_b_cfg.options);
+    let engine_a_label = cfg.engine_a.name.clone();
+    let engine_b_label = cfg.engine_b.name.clone();
 
     let mut artifacts = RunArtifacts::new(paths, save_results)?;
     let ui = ProgressUi::new(cfg.games)?;
@@ -62,8 +57,8 @@ pub async fn run_duel(
             swap_sides: cfg.swap_sides,
             mirrored_pairs: cfg.mirrored_pairs,
             base_seed: cfg.seed,
-            engine_a: engine_a_cfg.clone(),
-            engine_b: engine_b_cfg.clone(),
+            engine_a: cfg.engine_a.clone(),
+            engine_b: cfg.engine_b.clone(),
             cancel: cancel.clone(),
         },
         tx.clone(),
@@ -404,80 +399,4 @@ fn process_completed_game(
     );
 
     Ok(())
-}
-
-fn format_engine_label(name: &str, options: &BTreeMap<String, String>) -> String {
-    const MAX_LABEL_LEN: usize = 56;
-    let mut label = name.to_string();
-
-    let mut push_detail = |k: &str, v: &str| {
-        let sep = if label == name { " (" } else { ", " };
-        let suffix = format!("{sep}{k}={v}");
-        if label.len() + suffix.len() + 1 <= MAX_LABEL_LEN {
-            label.push_str(&suffix);
-            true
-        } else {
-            false
-        }
-    };
-
-    if let Some(v) = options.get("engine.ply") {
-        let _ = push_detail("ply", v);
-    }
-    if let Some(v) = options.get("engine.top_k") {
-        let _ = push_detail("top_k", v);
-    }
-    for (k, v) in options {
-        if k.starts_with("engine.") && k != "engine.ply" && k != "engine.top_k" {
-            if !push_detail(k.trim_start_matches("engine."), v) {
-                break;
-            }
-        }
-    }
-
-    if label == name { label } else { format!("{label})") }
-}
-
-fn filter_supported_engine_options(cfg: &EngineConfig) -> EngineConfig {
-    let mut filtered = cfg.clone();
-    let Ok(supported) = discover_supported_keys(cfg) else {
-        return filtered;
-    };
-    if supported.is_empty() {
-        return filtered;
-    }
-    let unsupported: Vec<String> = filtered
-        .options
-        .keys()
-        .filter(|k| !supported.contains(*k))
-        .cloned()
-        .collect();
-    if !unsupported.is_empty() {
-        eprintln!(
-            "warning: engine '{}' does not support {}; ignoring",
-            cfg.name,
-            unsupported.join(", ")
-        );
-    }
-    filtered.options.retain(|k, _| supported.contains(k));
-    filtered
-}
-
-fn discover_supported_keys(cfg: &EngineConfig) -> Result<HashSet<String>, String> {
-    let mut engine = EngineProcess::spawn(cfg)?;
-    engine.send_command("ubgi")?;
-    let mut keys = HashSet::new();
-    loop {
-        let line = engine.read_response()?;
-        if line == "ubgiok" || line == "readyok" {
-            break;
-        }
-        if let Some(rest) = line.strip_prefix("key ") {
-            if let Some(key) = rest.split_whitespace().next() {
-                keys.insert(key.to_string());
-            }
-        }
-    }
-    engine.quit();
-    Ok(keys)
 }

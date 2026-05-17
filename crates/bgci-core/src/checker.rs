@@ -112,7 +112,10 @@ pub fn run_check(engine_cfg: &EngineConfig, variant: Variant) -> Result<CheckRep
     engine.send_command("dice 6 1")?;
     report.supports_dice = true;
 
-    let legal_moves = game.position().legal_moves(dice)?;
+    let legal_moves = game
+        .position()
+        .legal_moves(dice)
+        .map_err(|err| err.to_string())?;
     let legal_ids: Vec<String> = game
         .legal_positions(&dice)
         .iter()
@@ -197,7 +200,7 @@ fn run_probe(
     let dice = probe.dice;
     let phase = probe.phase;
 
-    let Some(position) = gnuid::decode(variant, position_id) else {
+    let Ok(position) = gnuid::decode(variant, position_id) else {
         report.errors.push(format!(
             "{phase}: invalid probe position id '{position_id}'"
         ));
@@ -288,7 +291,7 @@ fn probe_move_notation(
     phase: &str,
     errors: &mut Vec<String>,
 ) -> Option<String> {
-    let Some(position) = gnuid::decode(variant, position_id) else {
+    let Ok(position) = gnuid::decode(variant, position_id) else {
         errors.push(format!(
             "{phase}: invalid probe position id '{position_id}'"
         ));
