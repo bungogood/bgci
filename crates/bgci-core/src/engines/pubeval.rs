@@ -2,9 +2,9 @@ use std::sync::OnceLock;
 use std::{fs, path::PathBuf};
 
 use bkgm::dice::Dice;
-use bkgm::{Game, State, VariantPosition};
+use bkgm::{encode_move_steps, Game, State, VariantPosition};
 
-use super::runtime::{run_ubgi_stdio, UbgiEngine};
+use super::runtime::{run_ubgi_stdio, UbgiEngine, UbgiError, UbgiMove};
 
 pub fn run(args: &[String]) -> Result<(), String> {
     let overrides = parse_pubeval_args(args)?;
@@ -25,10 +25,10 @@ impl UbgiEngine for PubevalAdapter {
         "1.0"
     }
 
-    fn choose_move(&mut self, game: &Game, dice: Dice) -> Result<String, String> {
+    fn choose_move(&mut self, game: &Game, dice: Dice) -> Result<UbgiMove, UbgiError> {
         let legal_positions = game.legal_positions(&dice);
         if legal_positions.is_empty() {
-            return Err("no_encodable_legal_moves".to_string());
+            return Err(UbgiError::bad_state("no_encodable_legal_moves"));
         }
 
         let race = is_race_position(game.position());
@@ -47,9 +47,8 @@ impl UbgiEngine for PubevalAdapter {
             }
         }
 
-        game.position()
-            .encode_move(legal_positions[best_idx], dice)
-            .map_err(|err| format!("move_encode {err}"))
+        encode_move_steps(game.position(), legal_positions[best_idx], dice)
+            .map_err(|err| UbgiError::bad_state(format!("move_encode {err}")))
     }
 }
 

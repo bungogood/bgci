@@ -1,10 +1,10 @@
 use bgci_core::common::parse_variant;
-use bgci_core::config::{DuelConfig, EngineConfig, load_toml, resolve_engine_shortcuts};
+use bgci_core::config::{DuelConfig, engine_identity_from_spec_with_options, load_toml, resolve_engine_shortcuts, resolve_engine_spec};
 use bgci_core::duel_runner::run_duel;
+use bgci_core::engine::filter_supported_engine_options;
 use bgci_core::output_paths::build_run_paths;
 use clap::Args;
 use rusqlite::{Connection, params};
-use std::collections::BTreeMap;
 use std::fs;
 use std::path::PathBuf;
 use tracing::info;
@@ -74,6 +74,8 @@ pub struct DuelArgs {
 pub async fn run(args: DuelArgs) -> Result<(), String> {
     let mut cfg = build_duel_config(&args)?;
     resolve_engine_shortcuts(&mut cfg)?;
+    cfg.engine_a = filter_supported_engine_options(&cfg.engine_a);
+    cfg.engine_b = filter_supported_engine_options(&cfg.engine_b);
 
     let mut run_paths = build_run_paths(&cfg.engine_a.name, &cfg.engine_b.name);
     if let Some(path) = &args.output_csv {
@@ -144,41 +146,26 @@ fn build_duel_config(args: &DuelArgs) -> Result<DuelConfig, String> {
             .clone()
             .ok_or_else(|| "missing --engine-b (or use --config)".to_string())?;
 
+        let (engine_a_key, mut engine_a_cfg) = resolve_engine_spec(&engine_a)?;
+        engine_a_cfg.name = engine_a_key;
+        let (engine_b_key, mut engine_b_cfg) = resolve_engine_spec(&engine_b)?;
+        engine_b_cfg.name = engine_b_key;
+
         let mut cfg = DuelConfig::default();
-        cfg.engine_a = EngineConfig {
-            name: engine_a.clone(),
-            engine: Some(engine_a),
-            command: Vec::new(),
-            env: Default::default(),
-            options: BTreeMap::new(),
-        };
-        cfg.engine_b = EngineConfig {
-            name: engine_b.clone(),
-            engine: Some(engine_b),
-            command: Vec::new(),
-            env: Default::default(),
-            options: BTreeMap::new(),
-        };
+        cfg.engine_a = engine_a_cfg;
+        cfg.engine_b = engine_b_cfg;
         cfg
     };
 
     if let Some(engine_a) = &args.engine_a {
-        cfg.engine_a = EngineConfig {
-            name: engine_a.clone(),
-            engine: Some(engine_a.clone()),
-            command: Vec::new(),
-            env: Default::default(),
-            options: BTreeMap::new(),
-        };
+        let (engine_a_key, mut engine_a_cfg) = resolve_engine_spec(engine_a)?;
+        engine_a_cfg.name = engine_a_key;
+        cfg.engine_a = engine_a_cfg;
     }
     if let Some(engine_b) = &args.engine_b {
-        cfg.engine_b = EngineConfig {
-            name: engine_b.clone(),
-            engine: Some(engine_b.clone()),
-            command: Vec::new(),
-            env: Default::default(),
-            options: BTreeMap::new(),
-        };
+        let (engine_b_key, mut engine_b_cfg) = resolve_engine_spec(engine_b)?;
+        engine_b_cfg.name = engine_b_key;
+        cfg.engine_b = engine_b_cfg;
     }
 
     if let Some(games) = args.games {
@@ -229,6 +216,13 @@ fn build_duel_config(args: &DuelArgs) -> Result<DuelConfig, String> {
         cfg.engine_b
             .options
             .insert("engine.ply".to_string(), ply.to_string());
+    }
+
+    if let Some(spec) = &args.engine_a {
+        cfg.engine_a.name = engine_identity_from_spec_with_options(spec, &cfg.engine_a.options)?;
+    }
+    if let Some(spec) = &args.engine_b {
+        cfg.engine_b.name = engine_identity_from_spec_with_options(spec, &cfg.engine_b.options)?;
     }
 
     Ok(cfg)

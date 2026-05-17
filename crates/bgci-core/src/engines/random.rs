@@ -1,7 +1,7 @@
 use bkgm::dice::Dice;
-use bkgm::Game;
+use bkgm::{encode_move_steps, Game};
 
-use super::runtime::{run_ubgi_stdio, UbgiEngine};
+use super::runtime::{run_ubgi_stdio, UbgiEngine, UbgiError, UbgiMove};
 
 pub fn run(_args: &[String]) -> Result<(), String> {
     let mut adapter = RandomAdapter;
@@ -20,14 +20,13 @@ impl UbgiEngine for RandomAdapter {
         "0.1"
     }
 
-    fn choose_move(&mut self, game: &Game, dice: Dice) -> Result<String, String> {
+    fn choose_move(&mut self, game: &Game, dice: Dice) -> Result<UbgiMove, UbgiError> {
         let legal_positions = game.legal_positions(&dice);
         if legal_positions.is_empty() {
-            return Err("no_encodable_legal_moves".to_string());
+            return Err(UbgiError::bad_state("no_encodable_legal_moves"));
         }
         let index = fastrand::usize(..legal_positions.len());
-        game.position()
-            .encode_move(legal_positions[index], dice)
-            .map_err(|err| format!("move_encode {err}"))
+        encode_move_steps(game.position(), legal_positions[index], dice)
+            .map_err(|err| UbgiError::bad_state(format!("move_encode {err}")))
     }
 }

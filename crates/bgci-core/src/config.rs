@@ -3,8 +3,9 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use crate::engines;
-use serde::Deserialize;
+use bkgm::{format_engine_spec, parse_engine_spec, EngineSpec};
 use serde::de::{self, Deserializer};
+use serde::Deserialize;
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(default)]
@@ -146,6 +147,129 @@ pub fn resolve_engine_reference(alias: &str) -> Result<EngineConfig, String> {
     };
     resolve_engine_alias(&mut engine, &registry)?;
     Ok(engine)
+}
+
+pub fn resolve_engine_spec(spec: &str) -> Result<(String, EngineConfig), String> {
+    let parsed = parse_engine_spec(spec)?;
+
+    let (engine_ref, resolved_version) =
+        resolve_engine_ref_for_spec(&parsed.alias, parsed.version.as_deref())?;
+    let mut cfg = resolve_engine_reference(&engine_ref)?;
+    let base_options = cfg.options.clone();
+    for (k, v) in parsed.options {
+        cfg.options.insert(k, v);
+    }
+
+    let identity_options = non_default_options(&cfg.options, &base_options);
+    let key = format_engine_spec(&EngineSpec {
+        alias: parsed.alias.clone(),
+        version: resolved_version,
+        options: identity_options,
+    });
+    Ok((key, cfg))
+}
+
+pub fn engine_identity_from_spec_with_options(
+    spec: &str,
+    effective_options: &BTreeMap<String, String>,
+) -> Result<String, String> {
+    let parsed = parse_engine_spec(spec)?;
+    let (engine_ref, resolved_version) =
+        resolve_engine_ref_for_spec(&parsed.alias, parsed.version.as_deref())?;
+    let base = resolve_engine_reference(&engine_ref)?;
+    let identity_options = non_default_options(effective_options, &base.options);
+    Ok(format_engine_spec(&EngineSpec {
+        alias: parsed.alias,
+        version: resolved_version,
+        options: identity_options,
+    }))
+}
+
+fn resolve_engine_ref_for_spec(
+    alias: &str,
+    version: Option<&str>,
+) -> Result<(String, Option<String>), String> {
+    if let Some(v) = version {
+        return Ok((format!("{}@{}", alias, v), Some(v.to_string())));
+    }
+
+    let registry = load_user_engine_registry()?;
+    let prefix = format!("{}@", alias.to_ascii_lowercase());
+    let mut candidates: Vec<String> = registry
+        .keys()
+        .filter(|k| k.starts_with(&prefix))
+        .cloned()
+        .collect();
+    if candidates.is_empty() {
+        return Ok((alias.to_string(), None));
+    }
+    candidates.sort_by(|a, b| compare_versioned_alias(a, b));
+    let selected = candidates
+        .last()
+        .cloned()
+        .unwrap_or_else(|| alias.to_string());
+    let selected_version = selected.split_once('@').map(|(_, v)| v.to_string());
+    Ok((selected, selected_version))
+}
+
+fn compare_versioned_alias(a: &str, b: &str) -> std::cmp::Ordering {
+    let va = a.split_once('@').map(|(_, v)| v).unwrap_or("");
+    let vb = b.split_once('@').map(|(_, v)| v).unwrap_or("");
+    compare_version_strings(va, vb)
+}
+
+fn compare_version_strings(a: &str, b: &str) -> std::cmp::Ordering {
+    let pa: Vec<u64> = a
+        .trim_start_matches('v')
+        .split('.')
+        .map(|p| p.parse::<u64>().unwrap_or(0))
+        .collect();
+    let pb: Vec<u64> = b
+        .trim_start_matches('v')
+        .split('.')
+        .map(|p| p.parse::<u64>().unwrap_or(0))
+        .collect();
+    let n = pa.len().max(pb.len());
+    for i in 0..n {
+        let av = *pa.get(i).unwrap_or(&0);
+        let bv = *pb.get(i).unwrap_or(&0);
+        match av.cmp(&bv) {
+            std::cmp::Ordering::Equal => {}
+            ord => return ord,
+        }
+    }
+    a.cmp(b)
+}
+
+fn non_default_options(
+    effective: &BTreeMap<String, String>,
+    defaults: &BTreeMap<String, String>,
+) -> BTreeMap<String, String> {
+    let mut out = BTreeMap::new();
+    for (k, v) in effective {
+        if defaults.get(k) != Some(v) {
+            out.insert(k.clone(), v.clone());
+        }
+    }
+    out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::non_default_options;
+    use std::collections::BTreeMap;
+
+    #[test]
+    fn strips_default_options_for_identity() {
+        let mut effective = BTreeMap::new();
+        effective.insert("engine.ply".to_string(), "1".to_string());
+        effective.insert("engine.top_k".to_string(), "8".to_string());
+        let mut defaults = BTreeMap::new();
+        defaults.insert("engine.ply".to_string(), "1".to_string());
+        let out = non_default_options(&effective, &defaults);
+        assert_eq!(out.get("engine.ply"), None);
+        assert_eq!(out.get("engine.top_k"), Some(&"8".to_string()));
+    }
 }
 
 fn resolve_engine_alias(

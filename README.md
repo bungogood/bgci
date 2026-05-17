@@ -88,7 +88,13 @@ bgci ratings --engines gnubg wildbg tabula pubeval --budget-games 10000
 bgci ratings --engines gnubg wildbg tabula pubeval --budget-games 2000 --reset
 
 # show persisted leaderboard without running new games
-bgci ratings --leaderboard
+bgci ratings --show
+
+# hard reset all ratings tables
+bgci ratings --reset-all
+
+# run ratings with per-engine options as part of identity
+bgci ratings --engines "gnubg:ply=1" "gnubg:ply=2" "wildbg:ply=1,top_k=8" --budget-games 4000
 
 # run with a simple live terminal dashboard
 bgci ratings --engines gnubg wildbg tabula pubeval --budget-games 2000 --pair-games 40 --parallel 4 --tui

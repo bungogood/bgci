@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use std::fs;
 use std::io::{BufRead, BufReader, Write};
 use std::path::Path;
@@ -7,10 +8,53 @@ use std::thread;
 use crate::common::variant_name;
 use crate::ubgi;
 use bkgm::dice::Dice;
+use bkgm::ubgi::parse_key_line;
 use bkgm::Variant;
 use tracing::{debug, error, info};
 
 use crate::config::EngineConfig;
+
+pub fn filter_supported_engine_options(cfg: &EngineConfig) -> EngineConfig {
+    let mut filtered = cfg.clone();
+    let Ok(supported) = discover_supported_keys(cfg) else {
+        return filtered;
+    };
+    if supported.is_empty() {
+        return filtered;
+    }
+    let unsupported: Vec<String> = filtered
+        .options
+        .keys()
+        .filter(|k| !supported.contains(*k))
+        .cloned()
+        .collect();
+    if !unsupported.is_empty() {
+        eprintln!(
+            "warning: engine '{}' does not support {}; ignoring",
+            cfg.name,
+            unsupported.join(", ")
+        );
+    }
+    filtered.options.retain(|k, _| supported.contains(k));
+    filtered
+}
+
+fn discover_supported_keys(cfg: &EngineConfig) -> Result<HashSet<String>, String> {
+    let mut engine = EngineProcess::spawn(cfg)?;
+    engine.send_command(ubgi::CMD_UBGI)?;
+    let mut keys = HashSet::new();
+    loop {
+        let line = engine.read_response()?;
+        if line == "ubgiok" || line == "readyok" {
+            break;
+        }
+        if let Some(spec) = parse_key_line(&line) {
+            keys.insert(spec.name);
+        }
+    }
+    engine.quit();
+    Ok(keys)
+}
 
 pub struct EngineProcess {
     child: Child,
