@@ -1,6 +1,6 @@
 use bkgm::codecs::gnuid;
 use bkgm::dice::Dice;
-use bkgm::{normalize_move_text, Game, Variant};
+use bkgm::{Game, Variant, normalize_move_text};
 
 use crate::config::EngineConfig;
 use crate::engine::EngineProcess;

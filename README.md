@@ -1,124 +1,91 @@
 # bgci
 
-`bgci` runs backgammon engine duels over UBGI.
+`bgci` runs reproducible backgammon engine tests over UBGI.
 
-![bgci pubeval vs random](docs/pubeval-vs-random.gif)
+The project is local-first. A duel is a reproducible two-engine benchmark made
+of mirrored game pairs. Duels are ephemeral by default and `--save` records
+them directly to a versioned SQLite database. Multi-engine leagues use the same
+pair and game records. There is no CSV result pipeline.
+
+See `docs/benchmark-v2-design.md` for the model and roadmap.
 
 ## Install
-
-Clone the repo and run:
 
 ```bash
 cargo install --path crates/bgci-cli
 ```
 
-Workspace layout:
+The workspace contains:
 
-- `crates/bgci-core`: engine protocol, duel runner, game execution primitives
-- `crates/bgci-cli`: `bgci` command-line frontend (`duel`, `check`, `engine`)
-- `crates/bgci-ratings`: ratings DB + ingest + leaderboard + pairing scheduler
-- `crates/bgci-ratings`: rating runner/orchestrator (`run`)
+- `crates/bgci-core`: UBGI engine execution, duel runner, and benchmark store
+- `crates/bgci-cli`: the `bgci` command-line frontend
 
 ## Quick Start
 
 ```bash
-bgci duel --engine-a pubeval --engine-b random --games 1000
-bgci check pubeval  # check UBGI compatibility
-bgci engine --list
+# Ephemeral duel (100 mirror pairs / 200 games)
+bgci duel --engine-a pubeval --engine-b random --pairs 100
+
+# Save the same duel as a named benchmark
+bgci duel \
+  --name new-evaluator \
+  --engine-a "gnubg:ply=2" \
+  --engine-b "gnubg:ply=1" \
+  --pairs 100 \
+  --parallel 4 \
+  --save
+
+# Fixed round-robin league (100 mirror pairs per matchup)
+bgci league \
+  --name local-engines \
+  --engines pubeval hureval pipcount random \
+  --pairs-per-matchup 100 \
+  --parallel 4
+
+bgci history list
+bgci history show 1
 ```
 
-## Important: User Engine Aliases
+The default database is:
 
-bgci supports XDG config and reads aliases from
-`XDG_CONFIG_HOME` (e.g `~/.config/bgci/config.toml`).
+```text
+$XDG_DATA_HOME/bgci/benchmarks.db
+~/.local/share/bgci/benchmarks.db
+```
 
-Example:
+Use `--db PATH` with `duel --save`, `league`, or `history` to select another
+database.
+
+## Benchmark Semantics
+
+A pair is the independent work unit. It contains two games with the same
+deterministic dice seed and swapped engine sides. A saved duel has one matchup.
+A league schedules every engine pairing and stores all results under one ID.
+
+Current summaries report games, wins, points, points per game, and uncertainty
+from completed mirror-pair scores. Elo-style ratings remain a future derived
+projection; raw immutable games are the source of truth.
+
+## Engine Aliases
+
+Aliases are loaded from `$XDG_CONFIG_HOME/bgci/config.toml` or
+`~/.config/bgci/config.toml`:
 
 ```toml
 [engines.wildbg]
 command = ["/path/to/wildbg", "--ubgi"]
 
 [engines.gnubg]
-command = ["/path/to/gnubg", "--ubgi", "--pkgdatadir", "/path/to/share", "--datadir", "/path/to/share"]
+command = ["/path/to/gnubg", "--ubgi"]
 ```
 
-References:
-
-- GNUbg fork with native UBGI support: <https://github.com/bungogood/gnubg-ubgi>
-- wildbg by Carsten Wenderdel: <https://github.com/carsten-wenderdel/wildbg>
-
-Then you can duel aliases directly:
+Inspect configured and built-in engines with:
 
 ```bash
-bgci duel --engine-a gnubg --engine-b wildbg --games 1000
+bgci engine --list
+bgci check pubeval
 ```
 
-## Useful Commands
+## UBGI
 
-```bash
-# duel from config
-bgci duel --config examples/pubeval-vs-random.toml
-
-# check both engines in a config
-bgci check --config examples/pubeval-vs-random.toml
-
-# check one side from config
-bgci check --config examples/pubeval-vs-random.toml a
-bgci check --config examples/pubeval-vs-random.toml b
-
-# record duel results into sqlite
-bgci duel --engine-a pubeval --engine-b random --games 200 --record --db data/eval.db
-
-# default DB path follows XDG:
-# $XDG_DATA_HOME/bgci/eval.db (or ~/.local/share/bgci/eval.db)
-
-# run an Elo search directly from an engine pool
-bgci ratings --engines gnubg wildbg tabula pubeval --budget-games 2000 --pair-games 40 --parallel 8
-
-# periodically replay all raw ratings games from DB for global refit
-bgci ratings --engines gnubg wildbg tabula pubeval --budget-games 20000 --pair-games 200 --refit-every-games 4000
-
-# enforce minimum pair coverage before pure information-gain scheduling
-bgci ratings --engines gnubg wildbg tabula pubeval --budget-games 20000 --pair-games 200 --min-pair-games 400
-
-# resume ratings state from DB (default DB follows XDG data path)
-bgci ratings --engines gnubg wildbg tabula pubeval --budget-games 10000
-
-# reset ratings state before running
-bgci ratings --engines gnubg wildbg tabula pubeval --budget-games 2000 --reset
-
-# show persisted leaderboard without running new games
-bgci ratings --show
-
-# hard reset all ratings tables
-bgci ratings --reset-all
-
-# run ratings with per-engine options as part of identity
-bgci ratings --engines "gnubg:ply=1" "gnubg:ply=2" "wildbg:ply=1,top_k=8" --budget-games 4000
-
-# run with a simple live terminal dashboard
-bgci ratings --engines gnubg wildbg tabula pubeval --budget-games 2000 --pair-games 40 --parallel 4 --tui
-
-# estimate rating of a candidate engine against rated pool (does not modify pool ratings)
-bgci eval --engine hawk1 --budget-games 2000 --pair-games 200
-
-# restrict eval to specific opponents from the ratings DB
-bgci eval --engine hawk1 --opponents wildbg hureval pubeval --budget-games 2000
-
-# equivalent standalone binary
-bgci-ratings run --engines gnubg wildbg tabula pubeval --budget-games 2000 --pair-games 40 --parallel 8
-```
-
-## UBGI Protocol
-
-bgci speaks UBGI (Universal Backgammon Interface), a UCI-inspired protocol for
-engine communication.
-
-Primary reference for this project:
-
-- `docs/ubgi-v0.2-spec.md`
-
-## References
-
-- UBGI early protocol work: <https://github.com/oysteijo/Universal-Backgammon-Interface>
-- GNU Backgammon: <https://www.gnu.org/software/gnubg/>
+The protocol reference used by this project is `docs/ubgi-v0.2-spec.md`.

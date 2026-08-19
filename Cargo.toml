@@ -2,7 +2,6 @@
 members = [
   "crates/bgci-core",
   "crates/bgci-cli",
-  "crates/bgci-ratings",
 ]
 default-members = ["crates/bgci-cli"]
 resolver = "2"

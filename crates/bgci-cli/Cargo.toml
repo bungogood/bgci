@@ -2,6 +2,8 @@
 name = "bgci-cli"
 version = "0.1.0"
 edition = "2024"
+rust-version = "1.85"
+description = "Reproducible backgammon engine testing over UBGI"
 default-run = "bgci"
 
 [[bin]]
@@ -11,7 +13,6 @@ path = "src/main.rs"
 [dependencies]
 bgci-core = { path = "../bgci-core" }
 clap = { version = "4.5", features = ["derive"] }
-rusqlite = { version = "0.32", features = ["bundled"] }
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
 tracing = "0.1"
 tracing-appender = "0.2"

@@ -1,5 +1,3 @@
-use std::fs;
-use std::io::{BufWriter, Write};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Instant;
@@ -7,13 +5,11 @@ use std::time::Instant;
 use bkgm::Variant;
 use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
 use tokio::sync::mpsc;
-use tokio::time::{Duration, Instant as TokioInstant, sleep_until};
 use tracing::debug;
 
-use crate::config::DuelConfig;
+use crate::config::MatchupConfig;
 use crate::duel_messages::{CompletedGame, WorkerMessage};
 use crate::duel_workers::{LocalWorkerSpec, spawn_local_workers};
-use crate::output_paths::RunPaths;
 use crate::report::render_status_lines;
 use crate::stats::{DuelStats, GameUpdate};
 
@@ -26,36 +22,68 @@ pub struct RunSummary {
     pub line_sides: String,
 }
 
-pub async fn run_duel(
-    cfg: &DuelConfig,
-    variant: Variant,
-    paths: &RunPaths,
-    save_results: bool,
-) -> Result<RunSummary, String> {
+#[derive(Clone, Debug)]
+pub enum GameOutcome {
+    Normal,
+    Gammon,
+    Backgammon,
+    Unknown,
+}
+
+impl GameOutcome {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Normal => "normal",
+            Self::Gammon => "gammon",
+            Self::Backgammon => "backgammon",
+            Self::Unknown => "unknown",
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct GameRecord {
+    pub game_idx: usize,
+    pub a_is_x: bool,
+    pub winner_a: Option<bool>,
+    pub outcome: Option<GameOutcome>,
+    pub points_x: f64,
+    pub points_o: f64,
+    pub points_a: f64,
+    pub points_b: f64,
+    pub plies: usize,
+}
+
+pub struct MatchupRun {
+    pub summary: RunSummary,
+    pub games: Vec<GameRecord>,
+}
+
+pub async fn run_matchup(cfg: &MatchupConfig, variant: Variant) -> Result<MatchupRun, String> {
     let engine_a_label = cfg.engine_a.name.clone();
     let engine_b_label = cfg.engine_b.name.clone();
+    let game_count = cfg
+        .pairs
+        .checked_mul(2)
+        .ok_or_else(|| "pair count is too large".to_string())?;
 
-    let mut artifacts = RunArtifacts::new(paths, save_results)?;
-    let ui = ProgressUi::new(cfg.games)?;
+    let ui = ProgressUi::new(game_count)?;
 
     let mut stats = DuelStats::new();
-    let workers = cfg.parallel.max(1).min(cfg.games.max(1));
+    let mut games = Vec::with_capacity(game_count);
+    let workers = cfg.parallel.max(1).min(cfg.pairs.max(1));
 
     let run_start = Instant::now();
 
     let (tx, mut rx) = mpsc::unbounded_channel::<WorkerMessage>();
-    let timeout_secs = cfg.timeout_secs;
     let cancel = Arc::new(AtomicBool::new(false));
-    let deadline = timeout_secs.map(|secs| TokioInstant::now() + Duration::from_secs(secs));
 
     spawn_local_workers(
         LocalWorkerSpec {
             workers,
-            games: cfg.games,
+            pairs: cfg.pairs,
             variant,
             max_plies: cfg.max_plies,
-            swap_sides: cfg.swap_sides,
-            mirrored_pairs: cfg.mirrored_pairs,
             base_seed: cfg.seed,
             engine_a: cfg.engine_a.clone(),
             engine_b: cfg.engine_b.clone(),
@@ -70,21 +98,7 @@ pub async fn run_duel(
     let mut run_error: Option<String> = None;
 
     while done_workers < workers {
-        let msg = if let Some(deadline) = deadline {
-            tokio::select! {
-                maybe = rx.recv() => maybe,
-                _ = sleep_until(deadline), if run_error.is_none() => {
-                    run_error = Some(format!(
-                        "duel timed out after {}s (completed {}/{} games)",
-                        timeout_secs.unwrap_or(0), done_games, cfg.games
-                    ));
-                    cancel.store(true, Ordering::Relaxed);
-                    continue;
-                }
-            }
-        } else {
-            rx.recv().await
-        };
+        let msg = rx.recv().await;
         let msg = match msg {
             Some(msg) => msg,
             None => break,
@@ -102,17 +116,9 @@ pub async fn run_duel(
             WorkerMessage::Game(done) => {
                 done_games += 1;
                 if run_error.is_none() {
-                    process_completed_game(
-                        &done,
-                        cfg,
-                        &mut artifacts,
-                        &mut stats,
-                        run_start,
-                        &ui,
-                        &engine_a_label,
-                        &engine_b_label,
-                        done_games,
-                    )?;
+                    games.push(process_completed_game(
+                        &done, cfg, &mut stats, run_start, &ui, done_games,
+                    )?);
                 }
             }
         }
@@ -121,8 +127,12 @@ pub async fn run_duel(
     if let Some(err) = run_error {
         return Err(err);
     }
+    if done_workers != workers || done_games != game_count {
+        return Err(format!(
+            "duel ended early: completed {done_games}/{game_count} games across {done_workers}/{workers} workers"
+        ));
+    }
 
-    artifacts.flush()?;
     ui.finish();
 
     let elapsed = run_start.elapsed();
@@ -130,58 +140,30 @@ pub async fn run_duel(
         render_status_lines(stats.status_view(
             &engine_a_label,
             &engine_b_label,
-            cfg.games,
+            game_count,
             elapsed,
         ));
 
-    Ok(RunSummary {
-        line_engines,
-        line_result,
-        line_rate,
-        line_decide,
-        line_class,
-        line_sides,
-    })
-}
-
-struct RunArtifacts {
-    trace_dir: std::path::PathBuf,
-    csv: Option<BufWriter<fs::File>>,
-}
-
-impl RunArtifacts {
-    fn new(paths: &RunPaths, save_results: bool) -> Result<Self, String> {
-        let csv = if save_results {
-            if let Some(parent) = paths.output_csv.parent() {
-                fs::create_dir_all(parent).map_err(|e| e.to_string())?;
-            }
-            let file = fs::File::create(&paths.output_csv).map_err(|e| e.to_string())?;
-            let mut writer = BufWriter::new(file);
-            writeln!(
-                writer,
-                "game,engine_x,engine_o,winner,outcome,points_x,points_o,points_a,points_b,plies"
-            )
-            .map_err(|e| e.to_string())?;
-            writer.flush().map_err(|e| e.to_string())?;
-            Some(writer)
-        } else {
-            None
-        };
-
-        fs::create_dir_all(&paths.trace_games_dir).map_err(|e| e.to_string())?;
-
-        Ok(Self {
-            trace_dir: paths.trace_games_dir.clone(),
-            csv,
-        })
-    }
-
-    fn flush(&mut self) -> Result<(), String> {
-        if let Some(csv) = self.csv.as_mut() {
-            csv.flush().map_err(|e| e.to_string())?;
+    games.sort_by_key(|game| game.game_idx);
+    for (expected_idx, game) in games.iter().enumerate() {
+        if game.game_idx != expected_idx || game.a_is_x != expected_idx.is_multiple_of(2) {
+            return Err(format!(
+                "invalid mirrored game sequence at game {}",
+                expected_idx + 1
+            ));
         }
-        Ok(())
     }
+    Ok(MatchupRun {
+        summary: RunSummary {
+            line_engines,
+            line_result,
+            line_rate,
+            line_decide,
+            line_class,
+            line_sides,
+        },
+        games,
+    })
 }
 
 struct ProgressUi {
@@ -254,48 +236,15 @@ impl ProgressUi {
 
 fn process_completed_game(
     done: &CompletedGame,
-    cfg: &DuelConfig,
-    artifacts: &mut RunArtifacts,
+    cfg: &MatchupConfig,
     stats: &mut DuelStats,
     run_start: Instant,
     ui: &ProgressUi,
-    engine_a_label: &str,
-    engine_b_label: &str,
     done_games: usize,
-) -> Result<(), String> {
+) -> Result<GameRecord, String> {
     let game_idx = done.game_idx;
     let a_is_x = done.a_is_x;
     let result = &done.result;
-
-    let trace_path = artifacts
-        .trace_dir
-        .join(format!("game_{:05}.log", game_idx + 1));
-    let mut trace = String::new();
-    trace.push_str(&format!(
-        "game={} engine_x={} engine_o={} winner={} plies={}\n",
-        game_idx + 1,
-        if a_is_x {
-            &cfg.engine_a.name
-        } else {
-            &cfg.engine_b.name
-        },
-        if a_is_x {
-            &cfg.engine_b.name
-        } else {
-            &cfg.engine_a.name
-        },
-        match result.winner_x {
-            Some(true) => "x",
-            Some(false) => "o",
-            None => "incomplete",
-        },
-        result.plies,
-    ));
-    for line in &result.trace_lines {
-        trace.push_str(line);
-        trace.push('\n');
-    }
-    fs::write(trace_path, trace).map_err(|e| e.to_string())?;
 
     debug!(
         game = game_idx + 1,
@@ -306,25 +255,10 @@ fn process_completed_game(
         "game complete"
     );
 
-    let winner_name = match result.winner_x {
-        Some(true) => {
-            if a_is_x {
-                &cfg.engine_a.name
-            } else {
-                &cfg.engine_b.name
-            }
-        }
-        Some(false) => {
-            if a_is_x {
-                &cfg.engine_b.name
-            } else {
-                &cfg.engine_a.name
-            }
-        }
-        None => "incomplete",
-    };
+    let winner_a = result.winner_x.map(|winner_x| winner_x == a_is_x);
 
     let (a_game_points, b_game_points) = stats.record_game(&GameUpdate {
+        game_idx,
         a_is_x,
         winner_x: result.winner_x,
         points_x: result.points_x,
@@ -336,53 +270,22 @@ fn process_completed_game(
         b_decision_sec: result.b_decision_sec,
     });
 
-    let engine_x = if a_is_x {
-        &cfg.engine_a.name
-    } else {
-        &cfg.engine_b.name
-    };
-    let engine_o = if a_is_x {
-        &cfg.engine_b.name
-    } else {
-        &cfg.engine_a.name
-    };
     let outcome = if result.winner_x.is_none() {
-        "incomplete"
+        None
     } else {
-        match result.points_x.abs().round() as i32 {
-            3 => "backgammon",
-            2 => "gammon",
-            1 => "normal",
-            _ => "unknown",
-        }
+        Some(match result.points_x.abs().round() as i32 {
+            3 => GameOutcome::Backgammon,
+            2 => GameOutcome::Gammon,
+            1 => GameOutcome::Normal,
+            _ => GameOutcome::Unknown,
+        })
     };
-
-    if let Some(csv) = artifacts.csv.as_mut() {
-        writeln!(
-            csv,
-            "{},{},{},{},{},{:.1},{:.1},{:.1},{:.1},{}",
-            game_idx + 1,
-            engine_x,
-            engine_o,
-            winner_name,
-            outcome,
-            result.points_x,
-            result.points_o,
-            a_game_points,
-            b_game_points,
-            result.plies
-        )
-        .map_err(|e| e.to_string())?;
-        if done_games.is_multiple_of(256) {
-            csv.flush().map_err(|e| e.to_string())?;
-        }
-    }
 
     let elapsed = run_start.elapsed();
     let (line_engines, line_result, line_rate, line_decide, line_class, line_sides) =
         render_status_lines(stats.status_view(
-            engine_a_label,
-            engine_b_label,
+            &cfg.engine_a.name,
+            &cfg.engine_b.name,
             done_games,
             elapsed,
         ));
@@ -398,5 +301,15 @@ fn process_completed_game(
         ),
     );
 
-    Ok(())
+    Ok(GameRecord {
+        game_idx,
+        a_is_x,
+        winner_a,
+        outcome,
+        points_x: f64::from(result.points_x),
+        points_o: f64::from(result.points_o),
+        points_a: f64::from(a_game_points),
+        points_b: f64::from(b_game_points),
+        plies: result.plies,
+    })
 }

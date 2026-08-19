@@ -2,7 +2,7 @@ use bgci_core::checker::run_check;
 use bgci_core::common::parse_variant;
 use bgci_core::config::EngineConfig;
 use bgci_core::config::{
-    load_toml, resolve_engine_reference, resolve_engine_shortcuts, DuelConfig,
+    MatchupConfig, load_toml, resolve_engine_reference, resolve_engine_shortcuts,
 };
 use clap::Args;
 
@@ -22,7 +22,7 @@ pub struct CheckArgs {
 
 pub fn run(args: CheckArgs) -> Result<(), String> {
     if let Some(config_path) = args.config {
-        let mut cfg: DuelConfig = load_toml(&config_path)?;
+        let mut cfg: MatchupConfig = load_toml(&config_path)?;
         resolve_engine_shortcuts(&mut cfg)?;
         let selected = match args.engine.as_deref() {
             Some(engine) if engine.eq_ignore_ascii_case("a") => vec![(cfg.engine_a, cfg.variant)],

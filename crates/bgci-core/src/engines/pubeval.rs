@@ -2,9 +2,9 @@ use std::sync::OnceLock;
 use std::{fs, path::PathBuf};
 
 use bkgm::dice::Dice;
-use bkgm::{encode_move_steps, Game, State, VariantPosition};
+use bkgm::{Game, State, VariantPosition, encode_move_steps};
 
-use super::runtime::{run_ubgi_stdio, UbgiEngine, UbgiError, UbgiMove};
+use super::runtime::{UbgiEngine, UbgiError, UbgiMove, run_ubgi_stdio};
 
 pub fn run(args: &[String]) -> Result<(), String> {
     let overrides = parse_pubeval_args(args)?;
@@ -243,10 +243,10 @@ fn to_pubeval_board(position: VariantPosition, mover_is_x: bool) -> [i32; 28] {
 fn encode_state<S: State>(p: S, mover_is_x: bool) -> [i32; 28] {
     let mut board = [0i32; 28];
 
-    for j in 1..=24 {
+    for (j, point) in board.iter_mut().enumerate().take(25).skip(1) {
         let src = if mover_is_x { j } else { 25 - j };
         let n = p.pip(src) as i32;
-        board[j] = if mover_is_x { n } else { -n };
+        *point = if mover_is_x { n } else { -n };
     }
 
     let (own_bar, opp_bar, own_off, opp_off) = if mover_is_x {

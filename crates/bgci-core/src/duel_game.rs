@@ -16,10 +16,9 @@ pub(crate) struct DuelGameResult {
     pub(crate) b_decisions: usize,
     pub(crate) a_decision_sec: f64,
     pub(crate) b_decision_sec: f64,
-    pub(crate) trace_lines: Vec<String>,
 }
 
-pub(crate) fn seed_for_game(base_seed: u64, game_idx: usize) -> u64 {
+pub fn seed_for_game(base_seed: u64, game_idx: usize) -> u64 {
     let mut z = base_seed.wrapping_add((game_idx as u64).wrapping_mul(0x9E3779B97F4A7C15));
     z = (z ^ (z >> 30)).wrapping_mul(0xBF58476D1CE4E5B9);
     z = (z ^ (z >> 27)).wrapping_mul(0x94D049BB133111EB);
@@ -39,7 +38,6 @@ pub(crate) fn play_game(
     let mut b_decisions = 0usize;
     let mut a_decision_sec = 0f64;
     let mut b_decision_sec = 0f64;
-    let mut trace_lines = Vec::new();
 
     for ply in 0..max_plies {
         let dice = if ply == 0 {
@@ -58,7 +56,6 @@ pub(crate) fn play_game(
                 b_decisions,
                 a_decision_sec,
                 b_decision_sec,
-                trace_lines,
             });
         }
         let position_id = gnuid::encode(game.position());
@@ -85,23 +82,6 @@ pub(crate) fn play_game(
             Dice::Double(d) => (d, d),
             Dice::Mixed(m) => (m.big(), m.small()),
         };
-
-        trace_lines.push(format!(
-            "ply={} turn={} dice={}/{} pos={} choice={} legal_count={}",
-            ply + 1,
-            if a_to_move { "A" } else { "B" },
-            d1,
-            d2,
-            position_id,
-            chosen_move,
-            legal.len(),
-        ));
-        if chosen_move != chosen_move_raw {
-            trace_lines.push(format!(
-                "choice_raw={} choice_canonical={}",
-                chosen_move_raw, chosen_move
-            ));
-        }
 
         let next = match game.position().apply_move(dice, &chosen_move) {
             Some(pos) => pos,
@@ -159,7 +139,6 @@ pub(crate) fn play_game(
                 b_decisions,
                 a_decision_sec,
                 b_decision_sec,
-                trace_lines,
             });
         }
     }
@@ -173,6 +152,5 @@ pub(crate) fn play_game(
         b_decisions,
         a_decision_sec,
         b_decision_sec,
-        trace_lines,
     })
 }

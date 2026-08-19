@@ -1,0 +1,37 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  rust:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out bgci
+        uses: actions/checkout@v4
+        with:
+          path: bgci
+
+      - name: Check out bkgm
+        uses: actions/checkout@v4
+        with:
+          repository: bungogood/bkgm
+          path: bkgm
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy,rustfmt
+
+      - name: Check formatting
+        run: cargo fmt --all -- --check
+        working-directory: bgci
+
+      - name: Test
+        run: cargo test --workspace
+        working-directory: bgci
+
+      - name: Lint
+        run: cargo clippy --workspace --all-targets -- -D warnings
+        working-directory: bgci

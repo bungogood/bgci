@@ -3,45 +3,39 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use crate::engines;
-use bkgm::{format_engine_spec, parse_engine_spec, EngineSpec};
+use bkgm::{EngineSpec, format_engine_spec, parse_engine_spec};
 use serde::de::{self, Deserializer};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(default)]
-pub struct DuelConfig {
-    pub games: usize,
+pub struct MatchupConfig {
+    pub pairs: usize,
     pub parallel: usize,
     pub seed: u64,
     pub max_plies: usize,
-    pub swap_sides: bool,
-    pub mirrored_pairs: bool,
     pub variant: String,
-    pub log: String,
-    pub timeout_secs: Option<u64>,
+    pub log_level: String,
     pub engine_a: EngineConfig,
     pub engine_b: EngineConfig,
 }
 
-impl Default for DuelConfig {
+impl Default for MatchupConfig {
     fn default() -> Self {
         Self {
-            games: 20,
+            pairs: 10,
             parallel: 1,
             seed: 42,
             max_plies: 512,
-            swap_sides: true,
-            mirrored_pairs: false,
             variant: "backgammon".to_string(),
-            log: "off".to_string(),
-            timeout_secs: None,
+            log_level: "off".to_string(),
             engine_a: EngineConfig::default_a(),
             engine_b: EngineConfig::default_b(),
         }
     }
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct EngineConfig {
     pub name: String,
     #[serde(default)]
@@ -129,7 +123,7 @@ where
     }
 }
 
-pub fn resolve_engine_shortcuts(cfg: &mut DuelConfig) -> Result<(), String> {
+pub fn resolve_engine_shortcuts(cfg: &mut MatchupConfig) -> Result<(), String> {
     let registry = load_user_engine_registry()?;
     resolve_engine_alias(&mut cfg.engine_a, &registry)?;
     resolve_engine_alias(&mut cfg.engine_b, &registry)?;
@@ -252,24 +246,6 @@ fn non_default_options(
         }
     }
     out
-}
-
-#[cfg(test)]
-mod tests {
-    use super::non_default_options;
-    use std::collections::BTreeMap;
-
-    #[test]
-    fn strips_default_options_for_identity() {
-        let mut effective = BTreeMap::new();
-        effective.insert("engine.ply".to_string(), "1".to_string());
-        effective.insert("engine.top_k".to_string(), "8".to_string());
-        let mut defaults = BTreeMap::new();
-        defaults.insert("engine.ply".to_string(), "1".to_string());
-        let out = non_default_options(&effective, &defaults);
-        assert_eq!(out.get("engine.ply"), None);
-        assert_eq!(out.get("engine.top_k"), Some(&"8".to_string()));
-    }
 }
 
 fn resolve_engine_alias(
@@ -480,4 +456,22 @@ fn expand_tilde_in_command(command: &mut [String]) {
 pub fn load_toml<T: for<'de> Deserialize<'de>>(path: impl AsRef<Path>) -> Result<T, String> {
     let content = fs::read_to_string(&path).map_err(|e| e.to_string())?;
     toml::from_str(&content).map_err(|e| e.to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::non_default_options;
+    use std::collections::BTreeMap;
+
+    #[test]
+    fn strips_default_options_for_identity() {
+        let mut effective = BTreeMap::new();
+        effective.insert("engine.ply".to_string(), "1".to_string());
+        effective.insert("engine.top_k".to_string(), "8".to_string());
+        let mut defaults = BTreeMap::new();
+        defaults.insert("engine.ply".to_string(), "1".to_string());
+        let out = non_default_options(&effective, &defaults);
+        assert_eq!(out.get("engine.ply"), None);
+        assert_eq!(out.get("engine.top_k"), Some(&"8".to_string()));
+    }
 }

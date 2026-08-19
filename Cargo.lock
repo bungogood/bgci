@@ -85,7 +85,6 @@ version = "0.1.0"
 dependencies = [
  "bgci-core",
  "clap",
- "rusqlite",
  "tokio",
  "tracing",
  "tracing-appender",
@@ -97,26 +96,15 @@ name = "bgci-core"
 version = "0.1.0"
 dependencies = [
  "bkgm",
- "clap",
  "fastrand",
  "indicatif",
  "rusqlite",
  "serde",
+ "serde_json",
  "shellexpand",
- "time",
  "tokio",
  "toml",
  "tracing",
-]
-
-[[package]]
-name = "bgci-ratings"
-version = "0.1.0"
-dependencies = [
- "bgci-core",
- "clap",
- "tokio",
- "tracing-subscriber",
 ]
 
 [[package]]
@@ -131,8 +119,10 @@ version = "0.6.0"
 dependencies = [
  "base64",
  "fastrand",
+ "memmap2",
  "mimalloc",
  "thiserror",
+ "tracing",
 ]
 
 [[package]]
@@ -447,6 +437,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f8ca58f447f06ed17d5fc4043ce1b10dd205e060fb3ce5b979b8ed8e59ff3f79"
 
 [[package]]
+name = "memmap2"
+version = "0.9.11"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d1219ed1b7f229ee7104d281dd01d6802fe28bb6e95d292942c4daacdeb798c0"
+dependencies = [
+ "libc",
+]
+
+[[package]]
 name = "mimalloc"
 version = "0.1.48"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -469,15 +468,6 @@ name = "num-conv"
 version = "0.2.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c6673768db2d862beb9b39a78fdcb1a69439615d5794a1be50caa9bc92c81967"
-
-[[package]]
-name = "num_threads"
-version = "0.1.7"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5c7398b9c8b70908f6371f47ed36737907c87c52af34c268fed0bf0ceb92ead9"
-dependencies = [
- "libc",
-]
 
 [[package]]
 name = "number_prefix"
@@ -624,6 +614,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "serde_json"
+version = "1.0.151"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c841b55ecdae098c80dcae9cf767f6f8a0c2cdb3416bbef72181df4d0fe73f14"
+dependencies = [
+ "itoa",
+ "memchr",
+ "serde",
+ "serde_core",
+ "zmij",
+]
+
+[[package]]
 name = "serde_spanned"
 version = "0.6.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -716,9 +719,7 @@ checksum = "743bd48c283afc0388f9b8827b976905fb217ad9e647fae3a379a9283c4def2c"
 dependencies = [
  "deranged",
  "itoa",
- "libc",
  "num-conv",
- "num_threads",
  "powerfmt",
  "serde_core",
  "time-core",
@@ -1089,3 +1090,9 @@ dependencies = [
  "quote",
  "syn",
 ]
+
+[[package]]
+name = "zmij"
+version = "1.0.23"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "29666d0abbfad1e3dc4dcf6144730dd3a3ab225bbbdac83319345b1b44ccfc1b"

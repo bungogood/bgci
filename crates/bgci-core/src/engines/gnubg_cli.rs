@@ -2,11 +2,11 @@ use std::fs::OpenOptions;
 use std::io::{BufRead, BufReader, Write};
 use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
 
+use bkgm::Game;
 use bkgm::codecs::gnuid;
 use bkgm::dice::Dice;
-use bkgm::Game;
 
-use super::runtime::{parse_ubgi_move, run_ubgi_stdio, UbgiEngine, UbgiError, UbgiMove};
+use super::runtime::{UbgiEngine, UbgiError, UbgiMove, parse_ubgi_move, run_ubgi_stdio};
 
 struct GnubgSession {
     child: Child,

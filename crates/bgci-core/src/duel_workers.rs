@@ -13,11 +13,9 @@ use crate::engine::EngineProcess;
 
 pub struct LocalWorkerSpec {
     pub workers: usize,
-    pub games: usize,
+    pub pairs: usize,
     pub variant: Variant,
     pub max_plies: usize,
-    pub swap_sides: bool,
-    pub mirrored_pairs: bool,
     pub base_seed: u64,
     pub engine_a: EngineConfig,
     pub engine_b: EngineConfig,
@@ -33,10 +31,8 @@ pub(crate) fn spawn_local_workers(spec: LocalWorkerSpec, tx: mpsc::UnboundedSend
         let engine_b_cfg = spec.engine_b.clone();
         let cancel = spec.cancel.clone();
         let max_plies = spec.max_plies;
-        let swap_sides = spec.swap_sides;
-        let mirrored_pairs = spec.mirrored_pairs;
         let base_seed = spec.base_seed;
-        let games = spec.games;
+        let pairs = spec.pairs;
 
         task::spawn_blocking(move || {
             let mut engine_a = match EngineProcess::spawn(&engine_a_cfg) {
@@ -85,60 +81,58 @@ pub(crate) fn spawn_local_workers(spec: LocalWorkerSpec, tx: mpsc::UnboundedSend
                 return;
             }
 
-            for game_idx in (worker_id..games).step_by(worker_count) {
+            for pair_idx in (worker_id..pairs).step_by(worker_count) {
                 if cancel.load(Ordering::Relaxed) {
                     break;
                 }
 
-                let a_is_x = !(swap_sides && game_idx % 2 == 1);
-                if let Err(err) = engine_a.new_game() {
-                    let _ = tx.send(WorkerMessage::Error(format!(
-                        "worker {} game {} new_game(A) failed: {}",
-                        worker_id + 1,
-                        game_idx + 1,
-                        err
-                    )));
-                    break;
-                }
-                if let Err(err) = engine_b.new_game() {
-                    let _ = tx.send(WorkerMessage::Error(format!(
-                        "worker {} game {} new_game(B) failed: {}",
-                        worker_id + 1,
-                        game_idx + 1,
-                        err
-                    )));
-                    break;
-                }
-
-                let seed_idx = if mirrored_pairs {
-                    game_idx / 2
-                } else {
-                    game_idx
-                };
-                let mut dice_gen = FastrandDice::with_seed(seed_for_game(base_seed, seed_idx));
-                match play_game(
-                    worker_variant,
-                    max_plies,
-                    &mut dice_gen,
-                    &mut engine_a,
-                    &mut engine_b,
-                    a_is_x,
-                ) {
-                    Ok(result) => {
-                        let _ = tx.send(WorkerMessage::Game(CompletedGame {
-                            game_idx,
-                            a_is_x,
-                            result,
-                        }));
-                    }
-                    Err(err) => {
+                for leg in 0..2 {
+                    let game_idx = pair_idx * 2 + leg;
+                    let a_is_x = leg == 0;
+                    if let Err(err) = engine_a.new_game() {
                         let _ = tx.send(WorkerMessage::Error(format!(
-                            "worker {} game {} failed: {}",
+                            "worker {} game {} new_game(A) failed: {}",
                             worker_id + 1,
                             game_idx + 1,
                             err
                         )));
                         break;
+                    }
+                    if let Err(err) = engine_b.new_game() {
+                        let _ = tx.send(WorkerMessage::Error(format!(
+                            "worker {} game {} new_game(B) failed: {}",
+                            worker_id + 1,
+                            game_idx + 1,
+                            err
+                        )));
+                        break;
+                    }
+
+                    let mut dice_gen = FastrandDice::with_seed(seed_for_game(base_seed, pair_idx));
+                    match play_game(
+                        worker_variant,
+                        max_plies,
+                        &mut dice_gen,
+                        &mut engine_a,
+                        &mut engine_b,
+                        a_is_x,
+                    ) {
+                        Ok(result) => {
+                            let _ = tx.send(WorkerMessage::Game(CompletedGame {
+                                game_idx,
+                                a_is_x,
+                                result,
+                            }));
+                        }
+                        Err(err) => {
+                            let _ = tx.send(WorkerMessage::Error(format!(
+                                "worker {} game {} failed: {}",
+                                worker_id + 1,
+                                game_idx + 1,
+                                err
+                            )));
+                            break;
+                        }
                     }
                 }
             }

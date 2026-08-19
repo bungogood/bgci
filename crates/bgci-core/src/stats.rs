@@ -1,10 +1,12 @@
+use std::collections::BTreeMap;
 use std::time::Duration;
 
 use crate::report::{StatusView, mean_ci95};
 
+#[derive(Default)]
 pub struct DuelStats {
     a_points: f32,
-    a_points_sq_sum: f64,
+    pair_points: BTreeMap<usize, (f64, usize)>,
     incomplete: usize,
     total_plies: usize,
     a_decisions: usize,
@@ -31,32 +33,7 @@ pub struct DuelStats {
 
 impl DuelStats {
     pub fn new() -> Self {
-        Self {
-            a_points: 0.0,
-            a_points_sq_sum: 0.0,
-            incomplete: 0,
-            total_plies: 0,
-            a_decisions: 0,
-            b_decisions: 0,
-            a_decision_sec: 0.0,
-            b_decision_sec: 0.0,
-            a_wins: 0,
-            b_wins: 0,
-            a_gammons: 0,
-            b_gammons: 0,
-            a_backgammons: 0,
-            b_backgammons: 0,
-            a_normals: 0,
-            b_normals: 0,
-            a_points_as_x: 0.0,
-            a_points_as_o: 0.0,
-            b_points_as_x: 0.0,
-            b_points_as_o: 0.0,
-            a_games_as_x: 0,
-            a_games_as_o: 0,
-            b_games_as_x: 0,
-            b_games_as_o: 0,
-        }
+        Self::default()
     }
 
     pub fn record_game(&mut self, update: &GameUpdate) -> (f32, f32) {
@@ -72,7 +49,9 @@ impl DuelStats {
         };
 
         self.a_points += a_game_points;
-        self.a_points_sq_sum += (a_game_points as f64) * (a_game_points as f64);
+        let pair = self.pair_points.entry(update.game_idx / 2).or_default();
+        pair.0 += f64::from(a_game_points);
+        pair.1 += 1;
 
         if update.a_is_x {
             self.a_points_as_x += update.points_x;
@@ -126,7 +105,19 @@ impl DuelStats {
     ) -> StatusView<'a> {
         let elapsed_secs = elapsed.as_secs_f64();
         let games = games_done.max(1);
-        let (a_avg_pts, a_avg_ci95) = mean_ci95(self.a_points as f64, self.a_points_sq_sum, games);
+        let complete_pair_ppg = self
+            .pair_points
+            .values()
+            .filter(|(_, legs)| *legs == 2)
+            .map(|(points, _)| points / 2.0)
+            .collect::<Vec<_>>();
+        let pair_sum = complete_pair_ppg.iter().sum::<f64>();
+        let pair_sq_sum = complete_pair_ppg.iter().map(|value| value * value).sum();
+        let (a_avg_pts, a_avg_ci95) = if complete_pair_ppg.is_empty() {
+            (self.a_points as f64 / games as f64, 0.0)
+        } else {
+            mean_ci95(pair_sum, pair_sq_sum, complete_pair_ppg.len())
+        };
 
         StatusView {
             engine_a,
@@ -169,6 +160,7 @@ impl DuelStats {
 }
 
 pub struct GameUpdate {
+    pub game_idx: usize,
     pub a_is_x: bool,
     pub winner_x: Option<bool>,
     pub points_x: f32,

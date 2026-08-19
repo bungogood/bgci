@@ -1,3 +1,4 @@
+pub mod benchmark;
 pub mod checker;
 pub mod common;
 pub mod config;
@@ -7,8 +8,6 @@ pub mod duel_runner;
 pub mod duel_workers;
 pub mod engine;
 pub mod engines;
-pub mod output_paths;
-pub mod ratings;
 pub mod report;
 pub mod stats;
 pub mod ubgi;

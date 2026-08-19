@@ -7,12 +7,19 @@ use std::thread;
 
 use crate::common::variant_name;
 use crate::ubgi;
+use bkgm::Variant;
 use bkgm::dice::Dice;
 use bkgm::ubgi::parse_key_line;
-use bkgm::Variant;
 use tracing::{debug, error, info};
 
-use crate::config::EngineConfig;
+use crate::config::{EngineConfig, engine_identity_from_spec_with_options, resolve_engine_spec};
+
+pub fn resolve_engine(spec: &str) -> Result<EngineConfig, String> {
+    let (_, config) = resolve_engine_spec(spec)?;
+    let mut config = filter_supported_engine_options(&config);
+    config.name = engine_identity_from_spec_with_options(spec, &config.options)?;
+    Ok(config)
+}
 
 pub fn filter_supported_engine_options(cfg: &EngineConfig) -> EngineConfig {
     let mut filtered = cfg.clone();

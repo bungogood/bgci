@@ -1,9 +1,8 @@
-games = 100
+pairs = 50
 seed = 42
 max_plies = 512
-swap_sides = true
 variant = "backgammon"
-log = "info"
+log_level = "info"
 
 [engine_a]
 name = "gnubg-cli"
