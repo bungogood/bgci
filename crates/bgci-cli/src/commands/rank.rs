@@ -366,14 +366,6 @@ fn show_ranking(
         if diagnostics.cycle_degrees == 0 {
             println!("  insufficient sampled cycles to assess non-transitivity");
         } else {
-            println!("  engine IDs");
-            for (position, rating) in ratings.iter().enumerate() {
-                println!(
-                    "    E{:<2} {}",
-                    position + 1,
-                    display_engine_name(&pool.engines[rating.index], false)
-                );
-            }
             let mut residual_matrix = vec![vec![None; ratings.len()]; ratings.len()];
             let mut position_by_engine = vec![0usize; ratings.len()];
             for (position, rating) in ratings.iter().enumerate() {
@@ -386,15 +378,15 @@ fn show_ranking(
                 residual_matrix[column][row] = Some(-residual.residual_ppg);
             }
             println!();
-            println!("  residual PPG matrix: row engine versus column engine");
+            println!("  residual PPG matrix: row rank versus column rank");
             println!("  positive means the row engine exceeds the global-model expectation");
             print!("       ");
             for column in 0..ratings.len() {
-                print!(" {:>6}", format!("E{}", column + 1));
+                print!(" {:>6}", column + 1);
             }
             println!();
             for (row, values) in residual_matrix.iter().enumerate() {
-                print!("  E{:<2} ", row + 1);
+                print!("  {:>2}  ", row + 1);
                 for (column, value) in values.iter().enumerate() {
                     if row == column {
                         print!(" {:>6}", "-");
