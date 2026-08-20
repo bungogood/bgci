@@ -3,7 +3,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use bgci_core::benchmark::{Database, RankingPool, RankingSpec, default_db_path};
-use bgci_core::common::parse_variant;
+use bgci_core::common::{parse_variant, variant_name};
 use bgci_core::config::ResolvedMatchup;
 use bgci_core::duel_runner::run_matchup;
 use bgci_core::engine::resolve_and_finalize_engines;
@@ -136,7 +136,7 @@ pub async fn run(args: RankArgs) -> Result<(), String> {
     let mut store = Database::open(&db_path)?;
     match args.command {
         RankCommand::Create(args) => {
-            parse_variant(&args.variant)?;
+            let variant = parse_variant(&args.variant)?;
             if args.placement_opponents == 0 || args.placement_pairs == 0 {
                 return Err("placement opponents and pairs must be greater than zero".to_string());
             }
@@ -147,9 +147,9 @@ pub async fn run(args: RankArgs) -> Result<(), String> {
             let pool = store.start_ranking(
                 RankingSpec {
                     name: &args.name,
-                    variant: &args.variant,
+                    variant: variant_name(variant),
                     seed: args.seed,
-                    max_plies: args.max_plies.max(1),
+                    max_plies: args.max_plies,
                     placement_opponents: args.placement_opponents,
                     placement_pairs: args.placement_pairs,
                     established_rd: args.established_rd,
@@ -277,15 +277,14 @@ async fn run_pool(
         };
         let config = ResolvedMatchup {
             pairs: batch_pairs,
-            parallel: session.parallel.max(1),
+            parallel: session.parallel,
             seed: matchup.seed(),
             max_plies: pool.max_plies,
-            variant: pool.variant.clone(),
-            log_level: "off".to_string(),
+            variant,
             engine_a: pool.engines[engine_a].config.clone(),
             engine_b: pool.engines[engine_b].config.clone(),
         };
-        let run = match run_matchup(&config, variant).await {
+        let run = match run_matchup(&config).await {
             Ok(run) => run,
             Err(error) => {
                 let error = cleanup_failed_batch(store, matchup, error);

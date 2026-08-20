@@ -2,7 +2,6 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
-use bkgm::Variant;
 use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
 use tokio::sync::mpsc;
 use tracing::debug;
@@ -32,17 +31,14 @@ pub struct MatchupRun {
     pub games: Vec<GameRecord>,
 }
 
-pub async fn run_matchup(cfg: &ResolvedMatchup, variant: Variant) -> Result<MatchupRun, String> {
-    let game_count = cfg
-        .pairs
-        .checked_mul(2)
-        .ok_or_else(|| "pair count is too large".to_string())?;
+pub async fn run_matchup(cfg: &ResolvedMatchup) -> Result<MatchupRun, String> {
+    let game_count = validate_execution(cfg.pairs, cfg.parallel, cfg.max_plies)?;
 
     let ui = ProgressUi::new(game_count)?;
 
     let mut stats = DuelStats::new();
     let mut games = Vec::with_capacity(game_count);
-    let workers = cfg.parallel.max(1).min(cfg.pairs.max(1));
+    let workers = cfg.parallel.min(cfg.pairs);
 
     let run_start = Instant::now();
 
@@ -53,7 +49,7 @@ pub async fn run_matchup(cfg: &ResolvedMatchup, variant: Variant) -> Result<Matc
         LocalWorkerSpec {
             workers,
             pairs: cfg.pairs,
-            variant,
+            variant: cfg.variant,
             max_plies: cfg.max_plies,
             base_seed: cfg.seed,
             engine_a: cfg.engine_a.clone(),
@@ -125,6 +121,21 @@ pub async fn run_matchup(cfg: &ResolvedMatchup, variant: Variant) -> Result<Matc
         summary: RunSummary { lines },
         games,
     })
+}
+
+fn validate_execution(pairs: usize, parallel: usize, max_plies: usize) -> Result<usize, String> {
+    if pairs == 0 {
+        return Err("pairs must be greater than zero".to_string());
+    }
+    if parallel == 0 {
+        return Err("parallel must be greater than zero".to_string());
+    }
+    if max_plies == 0 {
+        return Err("max plies must be greater than zero".to_string());
+    }
+    pairs
+        .checked_mul(2)
+        .ok_or_else(|| "pair count is too large".to_string())
 }
 
 struct ProgressUi {
@@ -215,5 +226,31 @@ fn process_completed_game(
         b_decisions: result.b_decisions,
         a_decision_time: result.a_decision_time,
         b_decision_time: result.b_decision_time,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::validate_execution;
+
+    #[test]
+    fn validates_execution_limits_without_starting_engines() {
+        assert_eq!(validate_execution(1, 1, 1), Ok(2));
+        assert_eq!(
+            validate_execution(0, 1, 1),
+            Err("pairs must be greater than zero".to_string())
+        );
+        assert_eq!(
+            validate_execution(1, 0, 1),
+            Err("parallel must be greater than zero".to_string())
+        );
+        assert_eq!(
+            validate_execution(1, 1, 0),
+            Err("max plies must be greater than zero".to_string())
+        );
+        assert_eq!(
+            validate_execution(usize::MAX, 1, 1),
+            Err("pair count is too large".to_string())
+        );
     }
 }

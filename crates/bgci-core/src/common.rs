@@ -1,4 +1,4 @@
-use bkgm::Variant;
+pub use bkgm::Variant;
 
 pub fn parse_variant(name: &str) -> Result<Variant, String> {
     match name.trim().to_ascii_lowercase().as_str() {

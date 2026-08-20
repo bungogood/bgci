@@ -3,7 +3,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use crate::engines;
-use bkgm::{EngineSpec, format_engine_spec, parse_engine_spec};
+use bkgm::{EngineSpec, Variant, format_engine_spec, parse_engine_spec};
 use serde::de::{self, Deserializer};
 use serde::{Deserialize, Serialize};
 
@@ -115,8 +115,7 @@ pub struct ResolvedMatchup {
     pub parallel: usize,
     pub seed: u64,
     pub max_plies: usize,
-    pub variant: String,
-    pub log_level: String,
+    pub variant: Variant,
     pub engine_a: ResolvedEngine,
     pub engine_b: ResolvedEngine,
 }
@@ -211,20 +210,6 @@ where
             Ok(cmds)
         }
     }
-}
-
-pub fn resolve_engine_shortcuts(cfg: MatchupConfig) -> Result<ResolvedMatchup, String> {
-    let registry = load_user_engine_registry()?;
-    Ok(ResolvedMatchup {
-        pairs: cfg.pairs,
-        parallel: cfg.parallel,
-        seed: cfg.seed,
-        max_plies: cfg.max_plies,
-        variant: cfg.variant,
-        log_level: cfg.log_level,
-        engine_a: resolve_engine_input_from_registry(cfg.engine_a, &registry)?,
-        engine_b: resolve_engine_input_from_registry(cfg.engine_b, &registry)?,
-    })
 }
 
 pub fn resolve_engine_input(engine: EngineInput) -> Result<ResolvedEngine, String> {
@@ -686,7 +671,7 @@ pub fn load_toml<T: for<'de> Deserialize<'de>>(path: impl AsRef<Path>) -> Result
 mod tests {
     use super::{
         MatchupConfig, UserConfig, canonicalize_resolved_engine_name, normalize_engine_registry,
-        resolve_engine_shortcuts, resolve_engine_spec_from_registry,
+        resolve_engine_input_from_registry, resolve_engine_spec_from_registry,
     };
 
     #[test]
@@ -727,10 +712,13 @@ mod tests {
         )
         .unwrap();
 
-        let resolved = resolve_engine_shortcuts(config).unwrap();
+        let resolved_a =
+            resolve_engine_input_from_registry(config.engine_a, &Default::default()).unwrap();
+        let resolved_b =
+            resolve_engine_input_from_registry(config.engine_b, &Default::default()).unwrap();
 
-        assert_eq!(resolved.engine_a.launch.command(), ["engine-a"]);
-        assert_eq!(resolved.engine_b.launch.command(), ["engine-b", "--flag"]);
+        assert_eq!(resolved_a.launch.command(), ["engine-a"]);
+        assert_eq!(resolved_b.launch.command(), ["engine-b", "--flag"]);
     }
 
     #[test]

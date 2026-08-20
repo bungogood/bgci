@@ -1,7 +1,7 @@
 use std::path::PathBuf;
 
 use bgci_core::benchmark::{BenchmarkSpec, Database, default_db_path};
-use bgci_core::common::parse_variant;
+use bgci_core::common::{parse_variant, variant_name};
 use bgci_core::config::ResolvedMatchup;
 use bgci_core::duel_runner::run_matchup;
 use bgci_core::engine::resolve_and_finalize_engines;
@@ -44,7 +44,6 @@ pub struct LeagueArgs {
 
 pub async fn run(args: LeagueArgs) -> Result<(), String> {
     validate_pairs(args.pairs_per_matchup)?;
-    let max_plies = args.max_plies.max(1);
     let variant = parse_variant(&args.variant)?;
     let engines = resolve_and_finalize_engines(&args.engines)?;
 
@@ -53,9 +52,9 @@ pub async fn run(args: LeagueArgs) -> Result<(), String> {
     let started = store.start_league(
         BenchmarkSpec {
             name: &args.name,
-            variant: &args.variant,
+            variant: variant_name(variant),
             seed: args.seed,
-            max_plies,
+            max_plies: args.max_plies,
             pairs: args.pairs_per_matchup,
         },
         &engines,
@@ -70,15 +69,14 @@ pub async fn run(args: LeagueArgs) -> Result<(), String> {
         );
         let cfg = ResolvedMatchup {
             pairs: args.pairs_per_matchup,
-            parallel: args.parallel.max(1),
+            parallel: args.parallel,
             seed: scheduled.handle.seed(),
-            max_plies,
-            variant: args.variant.clone(),
-            log_level: "off".to_string(),
+            max_plies: args.max_plies,
+            variant,
             engine_a: engines[scheduled.engine_a].clone(),
             engine_b: engines[scheduled.engine_b].clone(),
         };
-        let result = match run_matchup(&cfg, variant).await {
+        let result = match run_matchup(&cfg).await {
             Ok(result) => result,
             Err(error) => {
                 return Err(mark_failed(&store, started.id, error));

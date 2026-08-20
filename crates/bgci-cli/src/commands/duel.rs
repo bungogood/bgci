@@ -1,7 +1,7 @@
 use std::path::PathBuf;
 
 use bgci_core::benchmark::{BenchmarkSpec, Database, MatchupHandle, default_db_path};
-use bgci_core::common::parse_variant;
+use bgci_core::common::{parse_variant, variant_name};
 use bgci_core::config::{
     MatchupConfig, ResolvedMatchup, load_toml, resolve_engine_input, resolve_engine_spec,
 };
@@ -77,20 +77,19 @@ pub struct DuelArgs {
 }
 
 pub async fn run(args: DuelArgs) -> Result<(), String> {
-    let mut cfg = build_matchup_config(&args)?;
+    let built = build_matchup_config(&args)?;
+    let _log_guard = logging::init_tracing(&built.log_level, args.log_file.as_deref())?;
+    let mut cfg = built.matchup;
     cfg.engine_a = finalize_resolved_engine(cfg.engine_a);
     cfg.engine_b = finalize_resolved_engine(cfg.engine_b);
 
-    let _log_guard = logging::init_tracing(&cfg.log_level, args.log_file.as_deref())?;
-    let variant = parse_variant(&cfg.variant)?;
-
     info!(
-        log_level = %cfg.log_level,
+        log_level = %built.log_level,
         pairs = cfg.pairs,
         parallel = cfg.parallel,
         seed = cfg.seed,
         max_plies = cfg.max_plies,
-        variant = %cfg.variant,
+        variant = %variant_name(cfg.variant),
         engine_a = %cfg.engine_a.name,
         engine_a_cmd = %cfg.engine_a.launch.command().join(" "),
         engine_b = %cfg.engine_b.name,
@@ -107,7 +106,7 @@ pub async fn run(args: DuelArgs) -> Result<(), String> {
     } else {
         None
     };
-    let run = match run_matchup(&cfg, variant).await {
+    let run = match run_matchup(&cfg).await {
         Ok(run) => run,
         Err(error) => {
             if let Some(saved) = &saved {
@@ -138,7 +137,12 @@ pub async fn run(args: DuelArgs) -> Result<(), String> {
     Ok(())
 }
 
-fn build_matchup_config(args: &DuelArgs) -> Result<ResolvedMatchup, String> {
+struct DuelConfig {
+    matchup: ResolvedMatchup,
+    log_level: String,
+}
+
+fn build_matchup_config(args: &DuelArgs) -> Result<DuelConfig, String> {
     let mut cfg = if let Some(config_path) = &args.config {
         load_toml(config_path)?
     } else {
@@ -166,13 +170,13 @@ fn build_matchup_config(args: &DuelArgs) -> Result<ResolvedMatchup, String> {
         .checked_mul(2)
         .ok_or_else(|| "pair count is too large".to_string())?;
     if let Some(parallel) = args.parallel {
-        cfg.parallel = parallel.max(1);
+        cfg.parallel = parallel;
     }
     if let Some(seed) = args.seed {
         cfg.seed = seed;
     }
     if let Some(max_plies) = args.max_plies {
-        cfg.max_plies = max_plies.max(1);
+        cfg.max_plies = max_plies;
     }
     if let Some(variant) = &args.variant {
         cfg.variant = variant.clone();
@@ -188,13 +192,13 @@ fn build_matchup_config(args: &DuelArgs) -> Result<ResolvedMatchup, String> {
         Some(engine_b) => resolve_engine_spec(engine_b)?,
         None => resolve_engine_input(cfg.engine_b)?,
     };
-    let mut cfg = ResolvedMatchup {
+    let log_level = cfg.log_level;
+    let mut matchup = ResolvedMatchup {
         pairs: cfg.pairs,
         parallel: cfg.parallel,
         seed: cfg.seed,
         max_plies: cfg.max_plies,
-        variant: cfg.variant,
-        log_level: cfg.log_level,
+        variant: parse_variant(&cfg.variant)?,
         engine_a,
         engine_b,
     };
@@ -205,7 +209,8 @@ fn build_matchup_config(args: &DuelArgs) -> Result<ResolvedMatchup, String> {
         if ply < 1 {
             return Err("--ply-a/--ply must be >= 1".to_string());
         }
-        cfg.engine_a
+        matchup
+            .engine_a
             .launch
             .options_mut()
             .insert("engine.ply".to_string(), ply.to_string());
@@ -214,13 +219,14 @@ fn build_matchup_config(args: &DuelArgs) -> Result<ResolvedMatchup, String> {
         if ply < 1 {
             return Err("--ply-b/--ply must be >= 1".to_string());
         }
-        cfg.engine_b
+        matchup
+            .engine_b
             .launch
             .options_mut()
             .insert("engine.ply".to_string(), ply.to_string());
     }
 
-    Ok(cfg)
+    Ok(DuelConfig { matchup, log_level })
 }
 
 struct SavedDuel {
@@ -237,7 +243,7 @@ impl SavedDuel {
         let started = store.start_duel(
             BenchmarkSpec {
                 name: name.unwrap_or(&default_name),
-                variant: &cfg.variant,
+                variant: variant_name(cfg.variant),
                 seed: cfg.seed,
                 max_plies: cfg.max_plies,
                 pairs: cfg.pairs,

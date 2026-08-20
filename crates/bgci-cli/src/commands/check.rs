@@ -1,7 +1,7 @@
 use bgci_core::checker::run_check;
-use bgci_core::common::parse_variant;
+use bgci_core::common::{Variant, parse_variant};
 use bgci_core::config::{
-    MatchupConfig, ResolvedEngine, load_toml, resolve_engine_reference, resolve_engine_shortcuts,
+    MatchupConfig, ResolvedEngine, load_toml, resolve_engine_input, resolve_engine_reference,
 };
 use clap::Args;
 
@@ -22,14 +22,18 @@ pub struct CheckArgs {
 pub fn run(args: CheckArgs) -> Result<(), String> {
     if let Some(config_path) = args.config {
         let cfg: MatchupConfig = load_toml(&config_path)?;
-        let cfg = resolve_engine_shortcuts(cfg)?;
+        let variant = parse_variant(&cfg.variant)?;
         let selected = match args.engine.as_deref() {
-            Some(engine) if engine.eq_ignore_ascii_case("a") => vec![(cfg.engine_a, cfg.variant)],
-            Some(engine) if engine.eq_ignore_ascii_case("b") => vec![(cfg.engine_b, cfg.variant)],
-            Some(engine) => vec![(resolve_engine_reference(engine)?, cfg.variant)],
+            Some(engine) if engine.eq_ignore_ascii_case("a") => {
+                vec![(resolve_engine_input(cfg.engine_a)?, variant)]
+            }
+            Some(engine) if engine.eq_ignore_ascii_case("b") => {
+                vec![(resolve_engine_input(cfg.engine_b)?, variant)]
+            }
+            Some(engine) => vec![(resolve_engine_reference(engine)?, variant)],
             None => vec![
-                (cfg.engine_a, cfg.variant.clone()),
-                (cfg.engine_b, cfg.variant),
+                (resolve_engine_input(cfg.engine_a)?, variant),
+                (resolve_engine_input(cfg.engine_b)?, variant),
             ],
         };
 
@@ -47,12 +51,17 @@ pub fn run(args: CheckArgs) -> Result<(), String> {
         "missing engine. usage: bgci check <engine> or bgci check --config <path> [a|b]".to_string()
     })?;
     let engine_cfg = resolve_engine_reference(engine)?;
-    run_single(engine_cfg, "backgammon".to_string(), args.variant, args.ply)
+    run_single(
+        engine_cfg,
+        parse_variant("backgammon")?,
+        args.variant,
+        args.ply,
+    )
 }
 
 fn run_single(
     mut engine_cfg: ResolvedEngine,
-    default_variant: String,
+    default_variant: Variant,
     variant_override: Option<String>,
     ply_override: Option<usize>,
 ) -> Result<(), String> {
@@ -66,8 +75,10 @@ fn run_single(
             .insert("engine.ply".to_string(), ply.to_string());
     }
 
-    let variant_name = variant_override.unwrap_or(default_variant);
-    let variant = parse_variant(&variant_name)?;
+    let variant = match variant_override {
+        Some(variant) => parse_variant(&variant)?,
+        None => default_variant,
+    };
 
     let report = run_check(&engine_cfg, variant)?;
 
