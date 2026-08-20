@@ -4,18 +4,17 @@ use std::time::Duration;
 
 const ELO_TO_LOG_ODDS: f64 = std::f64::consts::LN_10 / 400.0;
 const PRIOR_RD: f64 = 300.0;
-const MIN_RD: f64 = 30.0;
 const MAX_RD: f64 = 350.0;
 const MAX_ITERATIONS: usize = 1_000;
 const DAMPING: f64 = 0.5;
 const MAX_IDLE_BATCHES: usize = 20;
 
 /// The result of one ranking game.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub struct RankingGame {
     pub engine_a: usize,
     pub engine_b: usize,
-    pub a_won: bool,
+    pub a_score: f64,
 }
 
 /// An engine's fitted Elo rating and approximate rating deviation.
@@ -43,6 +42,8 @@ pub fn fit_ratings(engine_count: usize, games: &[RankingGame]) -> Vec<Rating> {
             game.engine_a < engine_count
                 && game.engine_b < engine_count
                 && game.engine_a != game.engine_b
+                && game.a_score.is_finite()
+                && (0.0..=1.0).contains(&game.a_score)
         })
         .copied()
         .collect::<Vec<_>>();
@@ -67,8 +68,7 @@ pub fn fit_ratings(engine_count: usize, games: &[RankingGame]) -> Vec<Rating> {
 
         for game in &valid_games {
             let probability = logistic(strengths[game.engine_a] - strengths[game.engine_b]);
-            let result = f64::from(game.a_won);
-            let residual = result - probability;
+            let residual = game.a_score - probability;
             let fisher = probability * (1.0 - probability);
 
             gradient[game.engine_a] += residual;
@@ -108,7 +108,7 @@ pub fn fit_ratings(engine_count: usize, games: &[RankingGame]) -> Vec<Rating> {
         .map(|(index, strength)| Rating {
             index,
             elo: 1500.0 + strength / ELO_TO_LOG_ODDS,
-            rd: (information[index].recip().sqrt() / ELO_TO_LOG_ODDS).clamp(MIN_RD, MAX_RD),
+            rd: (information[index].recip().sqrt() / ELO_TO_LOG_ODDS).min(MAX_RD),
             games: games_per_engine[index],
         })
         .collect()
@@ -192,7 +192,7 @@ fn select_information_pair(
             let probability = logistic((left.elo - right.elo) * ELO_TO_LOG_ODDS);
             let uncertainty = left.rd.mul_add(left.rd, right.rd * right.rd);
             let information = probability * (1.0 - probability) * uncertainty;
-            let score = information / (engine_cost(left.index) + engine_cost(right.index));
+            let score = information / (engine_cost(left.index) + engine_cost(right.index)).sqrt();
             let count = pair_counts[left.index][right.index];
             let candidate = (score, count, left.index, right.index);
             if information_choice.is_none_or(|best| {
@@ -270,7 +270,7 @@ pub fn select_pair_for_pool(
             let right_cost = average_decision_time[right.index]
                 .map_or(1.0, |cost| cost.as_secs_f64())
                 .max(1e-9);
-            let utility = information / (left_cost + right_cost);
+            let utility = information / (left_cost + right_cost).sqrt();
             let candidate = (needs, count, utility, left.index, right.index);
             if choice.is_none_or(|best| {
                 candidate.0 > best.0
@@ -343,17 +343,17 @@ mod tests {
             games.push(RankingGame {
                 engine_a: 0,
                 engine_b: 1,
-                a_won: true,
+                a_score: 1.0,
             });
             games.push(RankingGame {
                 engine_a: 0,
                 engine_b: 2,
-                a_won: true,
+                a_score: 1.0,
             });
             games.push(RankingGame {
                 engine_a: 1,
                 engine_b: 2,
-                a_won: true,
+                a_score: 1.0,
             });
         }
 
@@ -363,6 +363,29 @@ mod tests {
         assert!(ratings[1].elo > ratings[2].elo);
         assert!((ratings.iter().map(|rating| rating.elo).sum::<f64>() / 3.0 - 1500.0).abs() < 1e-9);
         assert_eq!(ratings[0].games, 80);
+    }
+
+    #[test]
+    fn point_losses_outweigh_more_normal_wins() {
+        let mut games = Vec::new();
+        for _ in 0..6 {
+            games.push(RankingGame {
+                engine_a: 0,
+                engine_b: 1,
+                a_score: 2.0 / 3.0,
+            });
+        }
+        for _ in 0..4 {
+            games.push(RankingGame {
+                engine_a: 0,
+                engine_b: 1,
+                a_score: 0.0,
+            });
+        }
+
+        let ratings = fit_ratings(2, &games);
+
+        assert!(ratings[0].elo < ratings[1].elo);
     }
 
     #[test]
@@ -379,11 +402,26 @@ mod tests {
     }
 
     #[test]
+    fn uncertainty_continues_falling_with_more_games() {
+        let games = (0..2_000)
+            .map(|game| RankingGame {
+                engine_a: 0,
+                engine_b: 1,
+                a_score: if game % 2 == 0 { 1.0 } else { 0.0 },
+            })
+            .collect::<Vec<_>>();
+
+        let ratings = fit_ratings(2, &games);
+
+        assert!(ratings[0].rd < 10.0);
+    }
+
+    #[test]
     fn disconnected_engines_stay_at_the_pool_mean() {
         let games = vec![RankingGame {
             engine_a: 0,
             engine_b: 1,
-            a_won: true,
+            a_score: 1.0,
         }];
         let ratings = fit_ratings(4, &games);
 
@@ -401,12 +439,22 @@ mod tests {
             RankingGame {
                 engine_a: 0,
                 engine_b: 0,
-                a_won: true,
+                a_score: 1.0,
             },
             RankingGame {
                 engine_a: 0,
                 engine_b: 9,
-                a_won: true,
+                a_score: 1.0,
+            },
+            RankingGame {
+                engine_a: 0,
+                engine_b: 1,
+                a_score: f64::NAN,
+            },
+            RankingGame {
+                engine_a: 0,
+                engine_b: 1,
+                a_score: 1.1,
             },
         ];
 
@@ -466,6 +514,57 @@ mod tests {
                 10
             ),
             Some((0, 1))
+        );
+    }
+
+    #[test]
+    fn cheap_saturated_engines_do_not_crowd_out_uncertain_engines() {
+        let ratings = [
+            rating(0, 1500.0, 20.0),
+            rating(1, 1500.0, 20.0),
+            rating(2, 1500.0, 5.0),
+            rating(3, 1500.0, 5.0),
+        ];
+        let pair_counts = vec![vec![0; 4]; 4];
+
+        assert_eq!(
+            select_information_pair(
+                &ratings,
+                &pair_counts,
+                &[
+                    Some(Duration::from_millis(20)),
+                    Some(Duration::from_millis(20)),
+                    Some(Duration::from_micros(100)),
+                    Some(Duration::from_micros(100))
+                ],
+                &[Some(9); 4],
+                10
+            ),
+            Some((0, 1))
+        );
+    }
+
+    #[test]
+    fn information_selection_moves_on_from_saturated_pair() {
+        let mut ratings = [
+            rating(0, 1500.0, 30.0),
+            rating(1, 1500.0, 30.0),
+            rating(2, 1500.0, 30.0),
+            rating(3, 1500.0, 30.0),
+        ];
+        ratings[0].rd = 3.0;
+        ratings[1].rd = 3.0;
+        let pair_counts = vec![vec![0; 4]; 4];
+
+        assert_eq!(
+            select_information_pair(
+                &ratings,
+                &pair_counts,
+                &[Some(Duration::from_millis(1)); 4],
+                &[Some(9); 4],
+                10
+            ),
+            Some((2, 3))
         );
     }
 

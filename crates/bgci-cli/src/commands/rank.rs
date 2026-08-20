@@ -259,9 +259,13 @@ async fn run_pool(
         };
         let run = match run_matchup(&config, variant).await {
             Ok(run) => run,
-            Err(error) => break pause(store, &pool.name, pool.id, Some(error)),
+            Err(error) => {
+                let error = cleanup_failed_batch(store, matchup, error);
+                break pause(store, &pool.name, pool.id, Some(error));
+            }
         };
         if let Err(error) = store.record_games(matchup, &run.games) {
+            let error = cleanup_failed_batch(store, matchup, error);
             break pause(store, &pool.name, pool.id, Some(error));
         }
         pool.next_batch += 1;
@@ -354,5 +358,18 @@ fn pause(store: &BenchmarkStore, name: &str, id: i64, error: Option<String>) -> 
         (Some(error), Some(pause_error)) => Err(format!(
             "{error}; additionally failed to pause ranking: {pause_error}"
         )),
+    }
+}
+
+fn cleanup_failed_batch(
+    store: &BenchmarkStore,
+    matchup: bgci_core::benchmark::MatchupHandle,
+    error: String,
+) -> String {
+    match store.discard_empty_matchup(matchup) {
+        Ok(()) => error,
+        Err(cleanup_error) => {
+            format!("{error}; additionally failed to discard batch: {cleanup_error}")
+        }
     }
 }

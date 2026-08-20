@@ -83,19 +83,22 @@ bgci rank run main --parallel 8
 The scheduler first places each provisional engine against a configurable
 number of distinct opponents. It then selects matchups by expected information
 using current rating uncertainty, predicted win probability, and measured move
-time. An engine that has sat out 20 batches is forced back into consideration,
-so very slow models play less often after placement but are never permanently starved. An
-engine is shown as established only after placement and after its approximate
-RD falls below the pool's `--established-rd` threshold. Ratings are recomputed
-from immutable saved games after every batch.
+time. Runtime cost uses a square-root penalty so cheap engines improve throughput
+without crowding higher-uncertainty engines out of the schedule. An engine that
+has sat out 20 batches is forced back into consideration, so very slow models
+play less often after placement but are never permanently starved. An engine is
+shown as established only after placement and after its approximate RD falls
+below the pool's `--established-rd` threshold. Ratings are recomputed from
+immutable saved games after every batch.
 
 `--batch-pairs 20` runs 20 mirrored pairs (40 games) before refitting and
 selecting again. `--placement-opponents 3 --placement-pairs 20` requires useful
 connections to three opponents, not 20 pairs against every engine in the pool.
 
-The initial model is Bradley-Terry Elo over completed game wins. Reported RD is
-an approximate diagonal uncertainty estimate; gammons and backgammons are
-retained in raw results but do not yet affect the Elo fit.
+The model is Bradley-Terry Elo over normalized game points. A game's points are
+mapped from `[-3, +3]` to a score in `[0, 1]`, so gammons and backgammons affect
+the rating direction and negative PPG cannot be treated as a winning result.
+Reported RD is an approximate diagonal uncertainty estimate.
 
 The default database is:
 

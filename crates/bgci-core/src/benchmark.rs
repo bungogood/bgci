@@ -506,6 +506,26 @@ impl BenchmarkStore {
         Ok(matchup)
     }
 
+    pub fn discard_empty_matchup(&self, matchup: MatchupHandle) -> Result<(), String> {
+        let changed = self
+            .conn
+            .execute(
+                "DELETE FROM matchups
+                 WHERE id = ? AND NOT EXISTS (
+                   SELECT 1 FROM pairs WHERE matchup_id = matchups.id
+                 )",
+                params![matchup.id],
+            )
+            .map_err(|e| format!("discard empty matchup {}: {e}", matchup.id))?;
+        if changed == 0 {
+            return Err(format!(
+                "matchup {} cannot be discarded after results were recorded",
+                matchup.id
+            ));
+        }
+        Ok(())
+    }
+
     pub fn ranking_data(&self, pool: &RankingPool) -> Result<RankingData, String> {
         let index_by_build = pool
             .engines
@@ -544,7 +564,7 @@ impl BenchmarkStore {
         let mut game_stmt = self
             .conn
             .prepare(
-                "SELECT m.engine_a_id, m.engine_b_id, g.winner_id,
+                "SELECT m.engine_a_id, m.engine_b_id, g.winner_id, g.points_a,
                         g.decisions_a, g.decisions_b,
                         g.decision_seconds_a, g.decision_seconds_b, m.batch_index
                   FROM games g
@@ -559,11 +579,12 @@ impl BenchmarkStore {
                     row.get::<_, i64>(0)?,
                     row.get::<_, i64>(1)?,
                     row.get::<_, Option<i64>>(2)?,
-                    row.get::<_, i64>(3)?,
+                    row.get::<_, f64>(3)?,
                     row.get::<_, i64>(4)?,
-                    row.get::<_, f64>(5)?,
+                    row.get::<_, i64>(5)?,
                     row.get::<_, f64>(6)?,
-                    row.get::<_, i64>(7)?,
+                    row.get::<_, f64>(7)?,
+                    row.get::<_, i64>(8)?,
                 ))
             })
             .map_err(|e| format!("query ranking games: {e}"))?;
@@ -572,8 +593,17 @@ impl BenchmarkStore {
         let mut decision_seconds = vec![0.0_f64; pool.engines.len()];
         let mut last_played_batch = vec![None; pool.engines.len()];
         for row in game_rows {
-            let (a_id, b_id, winner_id, a_decisions, b_decisions, a_seconds, b_seconds, batch) =
-                row.map_err(|e| format!("read ranking game: {e}"))?;
+            let (
+                a_id,
+                b_id,
+                winner_id,
+                points_a,
+                a_decisions,
+                b_decisions,
+                a_seconds,
+                b_seconds,
+                batch,
+            ) = row.map_err(|e| format!("read ranking game: {e}"))?;
             if let (Some(&a), Some(&b)) = (index_by_build.get(&a_id), index_by_build.get(&b_id)) {
                 decision_counts[a] += a_decisions as usize;
                 decision_counts[b] += b_decisions as usize;
@@ -581,11 +611,11 @@ impl BenchmarkStore {
                 decision_seconds[b] += b_seconds;
                 last_played_batch[a] = Some(last_played_batch[a].unwrap_or(0).max(batch as usize));
                 last_played_batch[b] = Some(last_played_batch[b].unwrap_or(0).max(batch as usize));
-                if let Some(winner_id) = winner_id {
+                if winner_id.is_some() {
                     games.push(RankingGame {
                         engine_a: a,
                         engine_b: b,
-                        a_won: winner_id == a_id,
+                        a_score: 0.5 + points_a / 6.0,
                     });
                 }
             }
@@ -1283,6 +1313,11 @@ mod tests {
         let data = store.ranking_data(&pool).unwrap();
 
         assert_eq!(data.games.len(), 2);
+        assert!(
+            data.games
+                .iter()
+                .all(|game| (game.a_score - 2.0 / 3.0).abs() < 1e-12)
+        );
         assert_eq!(data.pair_counts[0][1], 1);
         assert_eq!(
             data.average_decision_time,
@@ -1303,5 +1338,34 @@ mod tests {
             .add_ranking_engines("ranking", &[config("c")])
             .unwrap();
         assert_eq!(expanded.engines.len(), 3);
+    }
+
+    #[test]
+    fn empty_ranking_batch_can_be_retried() {
+        let mut store =
+            BenchmarkStore::from_connection(Connection::open_in_memory().unwrap()).unwrap();
+        let mut pool = store
+            .start_ranking(
+                RankingSpec {
+                    name: "ranking",
+                    variant: "backgammon",
+                    seed: 42,
+                    max_plies: 512,
+                    placement_opponents: 1,
+                    placement_pairs: 1,
+                    established_rd: 80.0,
+                },
+                &[config("a"), config("b")],
+            )
+            .unwrap();
+        store.resume_ranking(pool.id).unwrap();
+        pool = store.load_ranking(pool.id).unwrap();
+        let failed = store.start_ranking_batch(&pool, 0, 1, 1).unwrap();
+
+        store.discard_empty_matchup(failed).unwrap();
+
+        let retry_pool = store.load_ranking(pool.id).unwrap();
+        assert_eq!(retry_pool.next_batch, 0);
+        assert!(store.start_ranking_batch(&retry_pool, 0, 1, 1).is_ok());
     }
 }
