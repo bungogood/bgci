@@ -341,8 +341,26 @@ fn show_ranking(store: &Database, pool: &RankingPool, diagnostics: bool) -> Resu
         println!("  * provisional: placement or RD requirement not yet met");
     }
     if diagnostics {
-        let diagnostics = transitivity_diagnostics(&model, &data.edges, 30);
+        let fit = model.fit_diagnostics;
         println!();
+        println!(
+            "fit health: {} ({}); iterations {}, rejected edges {}, inverse fallback {}, covariance sanitized {}",
+            if fit.reason.is_healthy() {
+                "healthy"
+            } else {
+                "unhealthy"
+            },
+            fit.reason.as_str(),
+            fit.iterations,
+            fit.rejected_edges,
+            if fit.covariance_inverse_fallback {
+                "yes"
+            } else {
+                "no"
+            },
+            fit.sanitized_covariance_entries,
+        );
+        let diagnostics = transitivity_diagnostics(&model, &data.edges, 30);
         println!(
             "transitivity diagnostics: {}/{} sampled edges, {} component(s), {} cycle degree(s)",
             diagnostics.observed_edges,

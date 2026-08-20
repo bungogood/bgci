@@ -42,6 +42,44 @@ pub struct Rating {
 pub struct RatingModel {
     pub ratings: Vec<Rating>,
     pub covariance: Vec<Vec<f64>>,
+    pub fit_diagnostics: FitDiagnostics,
+}
+
+/// Why fitting stopped.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FitReason {
+    Converged,
+    NoObservations,
+    LinearSolveFailed,
+    LineSearchFailed,
+    MaximumIterations,
+}
+
+impl FitReason {
+    pub const fn is_healthy(self) -> bool {
+        matches!(self, Self::Converged | Self::NoObservations)
+    }
+
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Converged => "converged",
+            Self::NoObservations => "no observations",
+            Self::LinearSolveFailed => "linear solve failed",
+            Self::LineSearchFailed => "line search failed",
+            Self::MaximumIterations => "maximum iterations reached",
+        }
+    }
+}
+
+/// Compact health metadata from fitting a rating model.
+///
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct FitDiagnostics {
+    pub reason: FitReason,
+    pub iterations: usize,
+    pub rejected_edges: usize,
+    pub covariance_inverse_fallback: bool,
+    pub sanitized_covariance_entries: usize,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -184,51 +222,79 @@ pub fn fit_rating_model(engine_count: usize, edges: &[RankingEdge]) -> RatingMod
         return RatingModel {
             ratings: Vec::new(),
             covariance: Vec::new(),
+            fit_diagnostics: FitDiagnostics {
+                reason: FitReason::NoObservations,
+                iterations: 0,
+                rejected_edges: edges.len(),
+                covariance_inverse_fallback: false,
+                sanitized_covariance_entries: 0,
+            },
         };
     }
 
+    let supplied_edge_count = edges.len();
     let edges = edges
         .iter()
         .filter(|edge| valid_edge(engine_count, edge))
         .copied()
         .collect::<Vec<_>>();
+    let mut fit_diagnostics = FitDiagnostics {
+        reason: FitReason::MaximumIterations,
+        iterations: 0,
+        rejected_edges: supplied_edge_count - edges.len(),
+        covariance_inverse_fallback: false,
+        sanitized_covariance_entries: 0,
+    };
     let prior_precision = ((PRIOR_RD * ELO_TO_LOG_ODDS).powi(2)).recip();
     let mut strengths = vec![0.0; engine_count];
 
-    for _ in 0..MAX_ITERATIONS {
+    for iteration in 0..MAX_ITERATIONS {
+        fit_diagnostics.iterations = iteration + 1;
         let (gradient, information) = derivatives(&strengths, &edges, prior_precision);
         let Some(step) = cholesky_solve(&information, &gradient) else {
+            fit_diagnostics.reason = FitReason::LinearSolveFailed;
             break;
         };
         let largest_step = step
             .iter()
             .fold(0.0_f64, |largest, value| largest.max(value.abs()));
         if largest_step < 1e-12 {
+            fit_diagnostics.reason = FitReason::Converged;
             break;
         }
 
         let objective = log_posterior(&strengths, &edges, prior_precision);
         let mut scale = 1.0;
-        loop {
+        let line_search_failed = loop {
             let mut candidate = strengths
                 .iter()
                 .zip(&step)
                 .map(|(strength, step)| strength + scale * step)
                 .collect::<Vec<_>>();
             center(&mut candidate);
-            if log_posterior(&candidate, &edges, prior_precision) >= objective || scale <= 1e-8 {
+            let accepted = log_posterior(&candidate, &edges, prior_precision) >= objective;
+            if accepted || scale <= 1e-8 {
                 strengths = candidate;
-                break;
+                break !accepted;
             }
             scale *= 0.5;
-        }
-        if scale * largest_step < 1e-10 {
+        };
+        if line_search_failed {
+            fit_diagnostics.reason = FitReason::LineSearchFailed;
             break;
         }
+        if scale * largest_step < 1e-10 {
+            fit_diagnostics.reason = FitReason::Converged;
+            break;
+        }
+    }
+    if edges.is_empty() && fit_diagnostics.reason == FitReason::Converged {
+        fit_diagnostics.reason = FitReason::NoObservations;
     }
 
     let (_, information) = derivatives(&strengths, &edges, prior_precision);
     let bread_inverse = dense_inverse(&information).unwrap_or_else(|| {
+        fit_diagnostics.covariance_inverse_fallback = true;
         let variance = prior_precision.recip();
         let mut fallback = vec![vec![0.0; engine_count]; engine_count];
         for (index, row) in fallback.iter_mut().enumerate() {
@@ -276,6 +342,7 @@ pub fn fit_rating_model(engine_count: usize, edges: &[RankingEdge]) -> RatingMod
                 *value *= elo_scale_squared;
                 if !value.is_finite() {
                     *value = 0.0;
+                    fit_diagnostics.sanitized_covariance_entries += 1;
                 }
             }
         }
@@ -302,6 +369,7 @@ pub fn fit_rating_model(engine_count: usize, edges: &[RankingEdge]) -> RatingMod
     RatingModel {
         ratings,
         covariance,
+        fit_diagnostics,
     }
 }
 
@@ -827,6 +895,21 @@ mod tests {
     }
 
     #[test]
+    fn fit_diagnostics_report_healthy_fit_and_rejected_edges() {
+        let invalid = RankingEdge {
+            score_sum_a: f64::NAN,
+            ..edge(0, 1, 10, 5.0)
+        };
+        let model = fit_rating_model(2, &[edge(0, 1, 10, 6.0), invalid]);
+
+        assert!(model.fit_diagnostics.reason.is_healthy());
+        assert!(model.fit_diagnostics.iterations > 0);
+        assert_eq!(model.fit_diagnostics.rejected_edges, 1);
+        assert!(!model.fit_diagnostics.covariance_inverse_fallback);
+        assert_eq!(model.fit_diagnostics.sanitized_covariance_entries, 0);
+    }
+
+    #[test]
     fn point_losses_outweigh_more_normal_wins() {
         let ratings = fit_rating_model(2, &[edge(0, 1, 10, 4.0)]).ratings;
 
@@ -960,6 +1043,7 @@ mod tests {
     #[test]
     fn full_model_handles_no_games_and_disconnected_engines() {
         let empty = fit_rating_model(3, &[]);
+        assert!(empty.fit_diagnostics.reason.is_healthy());
         assert!(empty.ratings.iter().all(|rating| rating.elo == 1500.0));
         assert!(
             empty
@@ -1127,6 +1211,13 @@ mod tests {
         let duplicate = RatingModel {
             ratings: vec![rating(0, 1500.0, 100.0), rating(0, 1500.0, 100.0)],
             covariance: vec![vec![1.0]],
+            fit_diagnostics: FitDiagnostics {
+                reason: FitReason::NoObservations,
+                iterations: 0,
+                rejected_edges: 0,
+                covariance_inverse_fallback: false,
+                sanitized_covariance_entries: 0,
+            },
         };
         assert_eq!(
             select_pair_for_model(&duplicate, &[vec![0]], &[None], &[None], 0, 0, 0),
