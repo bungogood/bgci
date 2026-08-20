@@ -2,9 +2,9 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
-use bgci_core::benchmark::{BenchmarkStore, RankingPool, RankingSpec, default_benchmark_db_path};
+use bgci_core::benchmark::{Database, RankingPool, RankingSpec, default_db_path};
 use bgci_core::common::parse_variant;
-use bgci_core::config::{EngineConfig, MatchupConfig};
+use bgci_core::config::{ResolvedEngine, ResolvedMatchup};
 use bgci_core::duel_runner::run_matchup;
 use bgci_core::engine::resolve_engine;
 use bgci_core::ranking::{
@@ -14,7 +14,7 @@ use clap::{Args, Subcommand};
 
 #[derive(Debug, Args)]
 pub struct RankArgs {
-    /// Benchmark database path; defaults to the XDG data directory.
+    /// Application database path; defaults to the XDG data directory.
     #[arg(long = "db", global = true)]
     db_path: Option<PathBuf>,
 
@@ -136,9 +136,9 @@ struct SessionArgs {
 }
 
 pub async fn run(args: RankArgs) -> Result<(), String> {
-    let db_path = args.db_path.unwrap_or_else(default_benchmark_db_path);
+    let db_path = args.db_path.unwrap_or_else(default_db_path);
     let verbose = args.verbose;
-    let mut store = BenchmarkStore::open(&db_path)?;
+    let mut store = Database::open(&db_path)?;
     match args.command {
         RankCommand::Create(args) => {
             parse_variant(&args.variant)?;
@@ -218,7 +218,7 @@ pub async fn run(args: RankArgs) -> Result<(), String> {
 }
 
 async fn run_pool(
-    store: &mut BenchmarkStore,
+    store: &mut Database,
     mut pool: RankingPool,
     session: SessionArgs,
     verbose: bool,
@@ -281,7 +281,7 @@ async fn run_pool(
             Ok(matchup) => matchup,
             Err(error) => break pause(store, &pool.name, pool.id, Some(error)),
         };
-        let config = MatchupConfig {
+        let config = ResolvedMatchup {
             pairs: batch_pairs,
             parallel: session.parallel.max(1),
             seed: matchup.seed(),
@@ -313,7 +313,7 @@ async fn run_pool(
 }
 
 fn show_ranking(
-    store: &BenchmarkStore,
+    store: &Database,
     pool: &RankingPool,
     diagnostics: bool,
     verbose: bool,
@@ -407,7 +407,11 @@ fn show_ranking(
 
 fn display_engine_name(engine: &bgci_core::benchmark::RankingEngine, verbose: bool) -> String {
     let mut configuration = std::collections::BTreeMap::new();
-    for (key, value) in engine.configuration.iter().chain(&engine.config.options) {
+    for (key, value) in engine
+        .configuration
+        .iter()
+        .chain(engine.config.launch.options())
+    {
         let key = key
             .strip_prefix("engine.")
             .or_else(|| key.strip_prefix("game."))
@@ -452,13 +456,13 @@ fn display_engine_name(engine: &bgci_core::benchmark::RankingEngine, verbose: bo
     }
 }
 
-fn resolve_engines(specs: &[String]) -> Result<Vec<EngineConfig>, String> {
+fn resolve_engines(specs: &[String]) -> Result<Vec<ResolvedEngine>, String> {
     let mut engines = Vec::with_capacity(specs.len());
     for spec in specs {
         let engine = resolve_engine(spec)?;
         if engines
             .iter()
-            .any(|existing: &EngineConfig| existing.name == engine.name)
+            .any(|existing: &ResolvedEngine| existing.name == engine.name)
         {
             return Err(format!("duplicate resolved engine: {}", engine.name));
         }
@@ -477,7 +481,7 @@ fn validate_session(args: &SessionArgs) -> Result<(), String> {
     Ok(())
 }
 
-fn pause(store: &BenchmarkStore, name: &str, id: i64, error: Option<String>) -> Result<(), String> {
+fn pause(store: &Database, name: &str, id: i64, error: Option<String>) -> Result<(), String> {
     let pause_error = store.pause_ranking(id).err();
     match (error, pause_error) {
         (None, None) => {
@@ -493,7 +497,7 @@ fn pause(store: &BenchmarkStore, name: &str, id: i64, error: Option<String>) -> 
 }
 
 fn cleanup_failed_batch(
-    store: &BenchmarkStore,
+    store: &Database,
     matchup: bgci_core::benchmark::MatchupHandle,
     error: String,
 ) -> String {

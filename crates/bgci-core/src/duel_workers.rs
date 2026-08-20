@@ -6,7 +6,7 @@ use bkgm::dice_gen::FastrandDice;
 use tokio::sync::mpsc;
 use tokio::task;
 
-use crate::config::EngineConfig;
+use crate::config::ResolvedEngine;
 use crate::duel_game::{play_game, seed_for_game};
 use crate::duel_messages::{CompletedGame, WorkerMessage};
 use crate::engine::EngineProcess;
@@ -17,8 +17,8 @@ pub struct LocalWorkerSpec {
     pub variant: Variant,
     pub max_plies: usize,
     pub base_seed: u64,
-    pub engine_a: EngineConfig,
-    pub engine_b: EngineConfig,
+    pub engine_a: ResolvedEngine,
+    pub engine_b: ResolvedEngine,
     pub cancel: Arc<AtomicBool>,
 }
 

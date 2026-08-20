@@ -7,7 +7,7 @@ use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
 use tokio::sync::mpsc;
 use tracing::debug;
 
-use crate::config::MatchupConfig;
+use crate::config::ResolvedMatchup;
 use crate::duel_messages::{CompletedGame, WorkerMessage};
 use crate::duel_workers::{LocalWorkerSpec, spawn_local_workers};
 use crate::report::render_status_lines;
@@ -63,7 +63,7 @@ pub struct MatchupRun {
     pub games: Vec<GameRecord>,
 }
 
-pub async fn run_matchup(cfg: &MatchupConfig, variant: Variant) -> Result<MatchupRun, String> {
+pub async fn run_matchup(cfg: &ResolvedMatchup, variant: Variant) -> Result<MatchupRun, String> {
     let engine_a_label = cfg.engine_a.name.clone();
     let engine_b_label = cfg.engine_b.name.clone();
     let game_count = cfg
@@ -240,7 +240,7 @@ impl ProgressUi {
 
 fn process_completed_game(
     done: &CompletedGame,
-    cfg: &MatchupConfig,
+    cfg: &ResolvedMatchup,
     stats: &mut DuelStats,
     run_start: Instant,
     ui: &ProgressUi,

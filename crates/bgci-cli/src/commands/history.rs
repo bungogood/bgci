@@ -1,11 +1,11 @@
 use std::path::PathBuf;
 
-use bgci_core::benchmark::{BenchmarkStore, default_benchmark_db_path};
+use bgci_core::benchmark::{Database, default_db_path};
 use clap::{Args, Subcommand};
 
 #[derive(Debug, Args)]
 pub struct HistoryArgs {
-    /// Benchmark database path; defaults to the XDG data directory.
+    /// Application database path; defaults to the XDG data directory.
     #[arg(long = "db", global = true)]
     db_path: Option<PathBuf>,
 
@@ -22,19 +22,19 @@ enum HistoryCommand {
 }
 
 pub fn run(args: HistoryArgs) -> Result<(), String> {
-    let db_path = args.db_path.unwrap_or_else(default_benchmark_db_path);
+    let db_path = args.db_path.unwrap_or_else(default_db_path);
     if !db_path.exists() {
         println!("no saved duels or leagues");
         return Ok(());
     }
-    let store = BenchmarkStore::open(db_path)?;
+    let store = Database::open(db_path)?;
     match args.command {
         HistoryCommand::List => list(&store),
         HistoryCommand::Show { id } => show(&store, id),
     }
 }
 
-fn list(store: &BenchmarkStore) -> Result<(), String> {
+fn list(store: &Database) -> Result<(), String> {
     let rows = store.list()?;
     if rows.is_empty() {
         println!("no saved duels or leagues");
@@ -55,7 +55,7 @@ fn list(store: &BenchmarkStore) -> Result<(), String> {
     Ok(())
 }
 
-fn show(store: &BenchmarkStore, id: i64) -> Result<(), String> {
+fn show(store: &Database, id: i64) -> Result<(), String> {
     let row = store
         .get(id)?
         .ok_or_else(|| format!("benchmark {id} not found"))?;

@@ -46,28 +46,26 @@ league has one or more scheduled matchups.
 
 ### Pair And Game
 
-A pair has a stable index and deterministic seed. It contains exactly two legs
-with swapped sides. Games are immutable accepted results. Retries and failures
-must never overwrite a conflicting accepted result.
+A pair has a stable index and deterministic seed. Its two game rows have swapped
+sides and are accepted atomically. Retries and failures must never overwrite a
+conflicting accepted result.
 
 ## Storage
 
-SQLite is the authoritative metadata and result store. The schema is versioned
-from its first release.
+SQLite is the authoritative local application store. There is one current
+schema, identified by SQLite `user_version = 1`.
 
 Core tables:
 
-- `schema_migrations`
 - `engine_builds`
 - `benchmarks`
 - `benchmark_engines`
 - `matchups`
-- `pairs`
 - `games`
 
 Raw benchmark definitions and game results are authoritative. Standings,
-ratings, confidence intervals, and progress summaries are rebuildable
-projections and may be cached only with an analysis version.
+ratings, confidence intervals, and progress summaries are derived directly
+from accepted game rows.
 
 There is no CSV ingestion or export path in the core. CLI output is for humans;
 future machine output uses a versioned JSON representation of the same typed
@@ -77,7 +75,7 @@ records.
 
 The first release uses a fixed number of mirror pairs. It reports:
 
-- completed and incomplete pairs
+- completed pairs
 - game wins and losses
 - normal, gammon, and backgammon distributions
 - points per game and paired point differential
@@ -115,14 +113,14 @@ Implemented:
 
 1. CSV and legacy global ratings persistence are removed.
 2. The matchup runner returns typed, mirrored game records.
-3. Versioned SQLite storage ingests results directly.
+3. SQLite storage ingests results directly into one current schema.
 4. Saved duels and leagues share one pair-oriented executor and schema.
 5. Run manifests are atomic and completion requires every requested pair.
 6. Reported uncertainty is calculated from completed mirror-pair scores.
 7. Adaptive ranking pools support coverage-first scheduling, information-guided
    batches, continuous execution, and pause/resume from SQLite.
-8. Ranking projections incrementally aggregate normalized point scores and
-   mirrored-pair covariance moments while retaining raw games as authority.
+8. Ranking queries aggregate normalized point scores and mirrored-pair
+   covariance moments directly from raw games.
 9. Ranking RD uses centered full covariance with finite-sample shrinkage toward
    model information and mirrored pairs as robust score clusters; descriptive
    edge residuals expose possible non-transitivity.

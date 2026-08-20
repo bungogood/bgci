@@ -1,8 +1,8 @@
 use std::path::PathBuf;
 
-use bgci_core::benchmark::{BenchmarkSpec, BenchmarkStore, default_benchmark_db_path};
+use bgci_core::benchmark::{BenchmarkSpec, Database, default_db_path};
 use bgci_core::common::parse_variant;
-use bgci_core::config::{EngineConfig, MatchupConfig};
+use bgci_core::config::{ResolvedEngine, ResolvedMatchup};
 use bgci_core::duel_runner::run_matchup;
 use bgci_core::engine::resolve_engine;
 use clap::Args;
@@ -37,7 +37,7 @@ pub struct LeagueArgs {
     #[arg(long, default_value = "backgammon")]
     variant: String,
 
-    /// Benchmark database path; defaults to the XDG data directory.
+    /// Application database path; defaults to the XDG data directory.
     #[arg(long = "db")]
     db_path: Option<PathBuf>,
 }
@@ -51,15 +51,15 @@ pub async fn run(args: LeagueArgs) -> Result<(), String> {
         let engine = resolve_engine(spec)?;
         if engines
             .iter()
-            .any(|existing: &EngineConfig| existing.name == engine.name)
+            .any(|existing: &ResolvedEngine| existing.name == engine.name)
         {
             return Err(format!("duplicate resolved engine: {}", engine.name));
         }
         engines.push(engine);
     }
 
-    let db_path = args.db_path.unwrap_or_else(default_benchmark_db_path);
-    let mut store = BenchmarkStore::open(&db_path)?;
+    let db_path = args.db_path.unwrap_or_else(default_db_path);
+    let mut store = Database::open(&db_path)?;
     let started = store.start_league(
         BenchmarkSpec {
             name: &args.name,
@@ -81,7 +81,7 @@ pub async fn run(args: LeagueArgs) -> Result<(), String> {
                 engines[a].name, engines[b].name
             );
             let matchup = started.matchups[matchup_number - 1];
-            let cfg = MatchupConfig {
+            let cfg = ResolvedMatchup {
                 pairs: args.pairs_per_matchup,
                 parallel: args.parallel.max(1),
                 seed: matchup.seed(),
@@ -108,7 +108,7 @@ pub async fn run(args: LeagueArgs) -> Result<(), String> {
     Ok(())
 }
 
-fn mark_failed(store: &BenchmarkStore, benchmark_id: i64, error: String) -> String {
+fn mark_failed(store: &Database, benchmark_id: i64, error: String) -> String {
     match store.fail_benchmark(benchmark_id) {
         Ok(()) => error,
         Err(status_error) => {

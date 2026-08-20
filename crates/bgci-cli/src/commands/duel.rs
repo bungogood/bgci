@@ -1,12 +1,10 @@
 use std::path::PathBuf;
 
-use bgci_core::benchmark::{
-    BenchmarkSpec, BenchmarkStore, MatchupHandle, default_benchmark_db_path,
-};
+use bgci_core::benchmark::{BenchmarkSpec, Database, MatchupHandle, default_db_path};
 use bgci_core::common::parse_variant;
 use bgci_core::config::{
-    MatchupConfig, engine_identity_from_spec_with_options, load_toml, resolve_engine_shortcuts,
-    resolve_engine_spec,
+    MatchupConfig, ResolvedMatchup, engine_identity_from_spec_with_options, load_toml,
+    resolve_engine_input, resolve_engine_spec,
 };
 use bgci_core::duel_runner::run_matchup;
 use bgci_core::engine::filter_supported_engine_options;
@@ -57,7 +55,7 @@ pub struct DuelArgs {
     #[arg(long, requires = "log_level")]
     log_file: Option<PathBuf>,
 
-    /// Save this duel to the benchmark database.
+    /// Save this duel to the local application database.
     #[arg(long)]
     save: bool,
 
@@ -65,7 +63,7 @@ pub struct DuelArgs {
     #[arg(long, requires = "save")]
     name: Option<String>,
 
-    /// Benchmark database path; defaults to the XDG data directory.
+    /// Application database path; defaults to the XDG data directory.
     #[arg(long = "db", requires = "save")]
     db_path: Option<PathBuf>,
 
@@ -81,14 +79,15 @@ pub struct DuelArgs {
 
 pub async fn run(args: DuelArgs) -> Result<(), String> {
     let mut cfg = build_matchup_config(&args)?;
-    resolve_engine_shortcuts(&mut cfg)?;
     cfg.engine_a = filter_supported_engine_options(&cfg.engine_a);
     cfg.engine_b = filter_supported_engine_options(&cfg.engine_b);
     if let Some(spec) = &args.engine_a {
-        cfg.engine_a.name = engine_identity_from_spec_with_options(spec, &cfg.engine_a.options)?;
+        cfg.engine_a.name =
+            engine_identity_from_spec_with_options(spec, cfg.engine_a.launch.options())?;
     }
     if let Some(spec) = &args.engine_b {
-        cfg.engine_b.name = engine_identity_from_spec_with_options(spec, &cfg.engine_b.options)?;
+        cfg.engine_b.name =
+            engine_identity_from_spec_with_options(spec, cfg.engine_b.launch.options())?;
     }
 
     let _log_guard = logging::init_tracing(&cfg.log_level, args.log_file.as_deref())?;
@@ -102,17 +101,15 @@ pub async fn run(args: DuelArgs) -> Result<(), String> {
         max_plies = cfg.max_plies,
         variant = %cfg.variant,
         engine_a = %cfg.engine_a.name,
-        engine_a_cmd = %cfg.engine_a.command.join(" "),
+        engine_a_cmd = %cfg.engine_a.launch.command().join(" "),
         engine_b = %cfg.engine_b.name,
-        engine_b_cmd = %cfg.engine_b.command.join(" "),
+        engine_b_cmd = %cfg.engine_b.launch.command().join(" "),
         "duel run header"
     );
 
     let mut saved = if args.save {
         Some(SavedDuel::start(
-            args.db_path
-                .clone()
-                .unwrap_or_else(default_benchmark_db_path),
+            args.db_path.clone().unwrap_or_else(default_db_path),
             args.name.as_deref(),
             &cfg,
         )?)
@@ -153,7 +150,7 @@ pub async fn run(args: DuelArgs) -> Result<(), String> {
     Ok(())
 }
 
-fn build_matchup_config(args: &DuelArgs) -> Result<MatchupConfig, String> {
+fn build_matchup_config(args: &DuelArgs) -> Result<ResolvedMatchup, String> {
     let mut cfg = if let Some(config_path) = &args.config {
         load_toml(config_path)?
     } else {
@@ -162,38 +159,15 @@ fn build_matchup_config(args: &DuelArgs) -> Result<MatchupConfig, String> {
                 "duel requires either --config or both --engine-a and --engine-b".to_string(),
             );
         }
-
-        let engine_a = args
-            .engine_a
-            .clone()
-            .ok_or_else(|| "missing --engine-a (or use --config)".to_string())?;
-        let engine_b = args
-            .engine_b
-            .clone()
-            .ok_or_else(|| "missing --engine-b (or use --config)".to_string())?;
-
-        let (engine_a_key, mut engine_a_cfg) = resolve_engine_spec(&engine_a)?;
-        engine_a_cfg.name = engine_a_key;
-        let (engine_b_key, mut engine_b_cfg) = resolve_engine_spec(&engine_b)?;
-        engine_b_cfg.name = engine_b_key;
-
-        MatchupConfig {
-            engine_a: engine_a_cfg,
-            engine_b: engine_b_cfg,
-            ..MatchupConfig::default()
+        if args.engine_a.is_none() {
+            return Err("missing --engine-a (or use --config)".to_string());
         }
-    };
+        if args.engine_b.is_none() {
+            return Err("missing --engine-b (or use --config)".to_string());
+        }
 
-    if let Some(engine_a) = &args.engine_a {
-        let (engine_a_key, mut engine_a_cfg) = resolve_engine_spec(engine_a)?;
-        engine_a_cfg.name = engine_a_key;
-        cfg.engine_a = engine_a_cfg;
-    }
-    if let Some(engine_b) = &args.engine_b {
-        let (engine_b_key, mut engine_b_cfg) = resolve_engine_spec(engine_b)?;
-        engine_b_cfg.name = engine_b_key;
-        cfg.engine_b = engine_b_cfg;
-    }
+        MatchupConfig::default()
+    };
 
     cfg.pairs = match args.pairs {
         Some(0) => return Err("--pairs must be greater than zero".to_string()),
@@ -218,6 +192,25 @@ fn build_matchup_config(args: &DuelArgs) -> Result<MatchupConfig, String> {
     if let Some(log_level) = &args.log_level {
         cfg.log_level = log_level.clone();
     }
+    let engine_a = match &args.engine_a {
+        Some(engine_a) => resolve_engine_spec(engine_a)?.1,
+        None => resolve_engine_input(cfg.engine_a)?,
+    };
+    let engine_b = match &args.engine_b {
+        Some(engine_b) => resolve_engine_spec(engine_b)?.1,
+        None => resolve_engine_input(cfg.engine_b)?,
+    };
+    let mut cfg = ResolvedMatchup {
+        pairs: cfg.pairs,
+        parallel: cfg.parallel,
+        seed: cfg.seed,
+        max_plies: cfg.max_plies,
+        variant: cfg.variant,
+        log_level: cfg.log_level,
+        engine_a,
+        engine_b,
+    };
+
     let ply_a = args.ply_a.or(args.ply);
     let ply_b = args.ply_b.or(args.ply);
     if let Some(ply) = ply_a {
@@ -225,7 +218,8 @@ fn build_matchup_config(args: &DuelArgs) -> Result<MatchupConfig, String> {
             return Err("--ply-a/--ply must be >= 1".to_string());
         }
         cfg.engine_a
-            .options
+            .launch
+            .options_mut()
             .insert("engine.ply".to_string(), ply.to_string());
     }
     if let Some(ply) = ply_b {
@@ -233,30 +227,33 @@ fn build_matchup_config(args: &DuelArgs) -> Result<MatchupConfig, String> {
             return Err("--ply-b/--ply must be >= 1".to_string());
         }
         cfg.engine_b
-            .options
+            .launch
+            .options_mut()
             .insert("engine.ply".to_string(), ply.to_string());
     }
 
     if let Some(spec) = &args.engine_a {
-        cfg.engine_a.name = engine_identity_from_spec_with_options(spec, &cfg.engine_a.options)?;
+        cfg.engine_a.name =
+            engine_identity_from_spec_with_options(spec, cfg.engine_a.launch.options())?;
     }
     if let Some(spec) = &args.engine_b {
-        cfg.engine_b.name = engine_identity_from_spec_with_options(spec, &cfg.engine_b.options)?;
+        cfg.engine_b.name =
+            engine_identity_from_spec_with_options(spec, cfg.engine_b.launch.options())?;
     }
 
     Ok(cfg)
 }
 
 struct SavedDuel {
-    store: BenchmarkStore,
+    store: Database,
     db_path: PathBuf,
     id: i64,
     matchup: MatchupHandle,
 }
 
 impl SavedDuel {
-    fn start(db_path: PathBuf, name: Option<&str>, cfg: &MatchupConfig) -> Result<Self, String> {
-        let mut store = BenchmarkStore::open(&db_path)?;
+    fn start(db_path: PathBuf, name: Option<&str>, cfg: &ResolvedMatchup) -> Result<Self, String> {
+        let mut store = Database::open(&db_path)?;
         let default_name = format!("{} vs {}", cfg.engine_a.name, cfg.engine_b.name);
         let started = store.start_duel(
             BenchmarkSpec {
@@ -283,7 +280,7 @@ impl SavedDuel {
     }
 }
 
-fn mark_failed(store: &BenchmarkStore, benchmark_id: i64, error: String) -> String {
+fn mark_failed(store: &Database, benchmark_id: i64, error: String) -> String {
     match store.fail_benchmark(benchmark_id) {
         Ok(()) => error,
         Err(status_error) => {

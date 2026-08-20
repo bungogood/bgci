@@ -98,7 +98,7 @@ impl RatingModel {
 ///
 /// Residuals are not significance tests: the same adaptive observations were
 /// used to fit the model. Pair-aware bootstrap calibration can be layered on
-/// this projection without rescanning raw games.
+/// these sufficient statistics without retaining individual game data.
 pub fn transitivity_diagnostics(
     model: &RatingModel,
     edges: &[RankingEdge],

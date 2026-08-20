@@ -2,7 +2,7 @@ use bkgm::codecs::gnuid;
 use bkgm::dice::Dice;
 use bkgm::{Game, Variant, normalize_move_text};
 
-use crate::config::EngineConfig;
+use crate::config::ResolvedEngine;
 use crate::engine::EngineProcess;
 
 pub struct CheckReport {
@@ -46,7 +46,7 @@ impl CheckReport {
     }
 }
 
-pub fn run_check(engine_cfg: &EngineConfig, variant: Variant) -> Result<CheckReport, String> {
+pub fn run_check(engine_cfg: &ResolvedEngine, variant: Variant) -> Result<CheckReport, String> {
     let mut engine = EngineProcess::spawn(engine_cfg)?;
     let mut report = CheckReport {
         engine_name: engine_cfg.name.clone(),
@@ -89,7 +89,7 @@ pub fn run_check(engine_cfg: &EngineConfig, variant: Variant) -> Result<CheckRep
     engine.send_command("isready")?;
     wait_readyok(&mut engine, &mut report.errors, "isready");
 
-    for (name, value) in &engine_cfg.options {
+    for (name, value) in engine_cfg.launch.options() {
         engine.send_command(&format!("set {name} {value}"))?;
         engine.send_command("isready")?;
         let _ = wait_readyok_optional(&mut engine, &mut report.errors, &format!("set {name}"));

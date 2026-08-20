@@ -12,16 +12,16 @@ use bkgm::dice::Dice;
 use bkgm::ubgi::parse_key_line;
 use tracing::{debug, error, info};
 
-use crate::config::{EngineConfig, engine_identity_from_spec_with_options, resolve_engine_spec};
+use crate::config::{ResolvedEngine, engine_identity_from_spec_with_options, resolve_engine_spec};
 
-pub fn resolve_engine(spec: &str) -> Result<EngineConfig, String> {
+pub fn resolve_engine(spec: &str) -> Result<ResolvedEngine, String> {
     let (_, config) = resolve_engine_spec(spec)?;
     let mut config = filter_supported_engine_options(&config);
-    config.name = engine_identity_from_spec_with_options(spec, &config.options)?;
+    config.name = engine_identity_from_spec_with_options(spec, config.launch.options())?;
     Ok(config)
 }
 
-pub fn filter_supported_engine_options(cfg: &EngineConfig) -> EngineConfig {
+pub fn filter_supported_engine_options(cfg: &ResolvedEngine) -> ResolvedEngine {
     let mut filtered = cfg.clone();
     let Ok(supported) = discover_supported_keys(cfg) else {
         return filtered;
@@ -30,7 +30,8 @@ pub fn filter_supported_engine_options(cfg: &EngineConfig) -> EngineConfig {
         return filtered;
     }
     let unsupported: Vec<String> = filtered
-        .options
+        .launch
+        .options()
         .keys()
         .filter(|k| !supported.contains(*k))
         .cloned()
@@ -42,11 +43,14 @@ pub fn filter_supported_engine_options(cfg: &EngineConfig) -> EngineConfig {
             unsupported.join(", ")
         );
     }
-    filtered.options.retain(|k, _| supported.contains(k));
+    filtered
+        .launch
+        .options_mut()
+        .retain(|k, _| supported.contains(k));
     filtered
 }
 
-fn discover_supported_keys(cfg: &EngineConfig) -> Result<HashSet<String>, String> {
+fn discover_supported_keys(cfg: &ResolvedEngine) -> Result<HashSet<String>, String> {
     let mut engine = EngineProcess::spawn(cfg)?;
     engine.send_command(ubgi::CMD_UBGI)?;
     let mut keys = HashSet::new();
@@ -71,15 +75,13 @@ pub struct EngineProcess {
 }
 
 impl EngineProcess {
-    pub fn spawn(config: &EngineConfig) -> Result<Self, String> {
-        if config.command.is_empty() {
-            return Err(format!("engine '{}' has empty command", config.name));
+    pub fn spawn(config: &ResolvedEngine) -> Result<Self, String> {
+        let command = config.launch.command();
+        let mut cmd = Command::new(&command[0]);
+        if command.len() > 1 {
+            cmd.args(&command[1..]);
         }
-        let mut cmd = Command::new(&config.command[0]);
-        if config.command.len() > 1 {
-            cmd.args(&config.command[1..]);
-        }
-        for (key, value) in &config.env {
+        for (key, value) in config.launch.env() {
             if key.ends_with("_TRACE_LOG") || key.ends_with("_DEBUG_LOG") {
                 let p = Path::new(value);
                 if let Some(parent) = p.parent() {
@@ -89,7 +91,7 @@ impl EngineProcess {
             }
             cmd.env(key, value);
         }
-        info!(engine = %config.name, command = ?config.command, "spawn engine");
+        info!(engine = %config.name, command = ?command, "spawn engine");
         let mut child = cmd
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
@@ -127,7 +129,8 @@ impl EngineProcess {
             stdin,
             stdout: BufReader::new(stdout),
             options: config
-                .options
+                .launch
+                .options()
                 .iter()
                 .map(|(k, v)| (k.clone(), v.clone()))
                 .collect(),

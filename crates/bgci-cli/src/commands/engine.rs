@@ -84,7 +84,11 @@ pub fn run(args: EngineArgs) -> Result<(), String> {
     }
 
     let engine = resolve_engine_reference(&kind)?;
-    run_external_engine(&engine.command, &engine.env, &args.engine_args)
+    run_external_engine(
+        engine.launch.command(),
+        engine.launch.env(),
+        &args.engine_args,
+    )
 }
 
 fn run_external_engine(

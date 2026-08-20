@@ -1,8 +1,7 @@
 use bgci_core::checker::run_check;
 use bgci_core::common::parse_variant;
-use bgci_core::config::EngineConfig;
 use bgci_core::config::{
-    MatchupConfig, load_toml, resolve_engine_reference, resolve_engine_shortcuts,
+    MatchupConfig, ResolvedEngine, load_toml, resolve_engine_reference, resolve_engine_shortcuts,
 };
 use clap::Args;
 
@@ -22,8 +21,8 @@ pub struct CheckArgs {
 
 pub fn run(args: CheckArgs) -> Result<(), String> {
     if let Some(config_path) = args.config {
-        let mut cfg: MatchupConfig = load_toml(&config_path)?;
-        resolve_engine_shortcuts(&mut cfg)?;
+        let cfg: MatchupConfig = load_toml(&config_path)?;
+        let cfg = resolve_engine_shortcuts(cfg)?;
         let selected = match args.engine.as_deref() {
             Some(engine) if engine.eq_ignore_ascii_case("a") => vec![(cfg.engine_a, cfg.variant)],
             Some(engine) if engine.eq_ignore_ascii_case("b") => vec![(cfg.engine_b, cfg.variant)],
@@ -52,7 +51,7 @@ pub fn run(args: CheckArgs) -> Result<(), String> {
 }
 
 fn run_single(
-    mut engine_cfg: EngineConfig,
+    mut engine_cfg: ResolvedEngine,
     default_variant: String,
     variant_override: Option<String>,
     ply_override: Option<usize>,
@@ -62,7 +61,8 @@ fn run_single(
             return Err("--ply must be >= 1".to_string());
         }
         engine_cfg
-            .options
+            .launch
+            .options_mut()
             .insert("engine.ply".to_string(), ply.to_string());
     }
 

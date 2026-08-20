@@ -103,10 +103,9 @@ the rating direction and negative PPG cannot be treated as a winning result.
 Reported RD comes from full pool-relative covariance calibrated with mirrored
 pairs as score clusters and finite-sample shrinkage toward model information.
 
-Raw games remain authoritative, while transactionally maintained per-matchup
-and per-engine projections make routine fitting independent of total game
-count. Existing schema-v1 databases are backfilled automatically. Inspect
-descriptive model residuals and graph cycle coverage with:
+Raw games are authoritative. Ranking statistics are derived directly from
+accepted mirrored game rows. Inspect descriptive model residuals and graph
+cycle coverage with:
 
 ```bash
 bgci rank show main --diagnostics
@@ -115,11 +114,11 @@ bgci rank show main --diagnostics
 These diagnostics are not significance tests; bootstrap calibration remains
 required before claiming a matchup is genuinely non-transitive.
 
-The default database is:
+Local application state is stored in:
 
 ```text
-$XDG_DATA_HOME/bgci/benchmarks.db
-~/.local/share/bgci/benchmarks.db
+$XDG_DATA_HOME/bgci/bgci.db
+~/.local/share/bgci/bgci.db
 ```
 
 Use `--db PATH` with `duel --save`, `league`, `rank`, or `history` to select
@@ -132,8 +131,8 @@ deterministic dice seed and swapped engine sides. A saved duel has one matchup.
 A league schedules every engine pairing and stores all results under one ID.
 
 Current summaries report games, wins, points, points per game, and uncertainty
-from completed mirror-pair scores. Elo-style ratings remain a future derived
-projection; raw immutable games are the source of truth.
+from completed mirror-pair scores. Rankings derive Elo-style ratings from those
+scores; raw immutable games remain the source of truth.
 
 ## Engine Aliases
 
