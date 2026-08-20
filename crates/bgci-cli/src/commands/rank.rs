@@ -182,7 +182,7 @@ pub async fn run(args: RankArgs) -> Result<(), String> {
             let specs = pool
                 .engines
                 .iter()
-                .map(|engine| engine.name.clone())
+                .map(|engine| engine.config.name.clone())
                 .collect::<Vec<_>>();
             let engines = resolve_and_finalize_engines(&specs)?;
             let pool =
@@ -267,8 +267,8 @@ async fn run_pool(
         println!(
             "batch {}: {} vs {} ({} pairs)",
             pool.next_batch + 1,
-            pool.engines[engine_a].name,
-            pool.engines[engine_b].name,
+            pool.engines[engine_a].config.name,
+            pool.engines[engine_b].config.name,
             batch_pairs
         );
         let matchup = match store.start_ranking_batch(&pool, engine_a, engine_b, batch_pairs) {
@@ -335,7 +335,7 @@ fn show_ranking(store: &Database, pool: &RankingPool, diagnostics: bool) -> Resu
             .unwrap_or_else(|| "-".to_string());
         println!(
             "{:>5}  {:<engine_width$}  {:>7.1}  {:>5.1}  {:>7}  {:>6}",
-            rank_label, engine.name, rating.elo, rating.rd, move_ms, rating.games
+            rank_label, engine.config.name, rating.elo, rating.rd, move_ms, rating.games
         );
     }
     if has_provisional {

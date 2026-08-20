@@ -3,7 +3,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use rusqlite::{Connection, OptionalExtension, Transaction, params};
+use rusqlite::{Connection, OptionalExtension, Row, Transaction, params};
 
 use crate::config::{EngineLaunch, EngineMetadata, ResolvedEngine};
 use crate::duel_game::seed_for_game;
@@ -11,6 +11,12 @@ use crate::duel_runner::GameRecord;
 use crate::ranking::RankingEdge;
 
 const SCHEMA_VERSION: i64 = 1;
+const BENCHMARK_SUMMARY_PROJECTION: &str =
+    "SELECT b.id, b.name, b.kind, b.status, b.variant, b.requested_pairs,
+            COUNT(g.id) / 2, COUNT(g.id)
+     FROM benchmarks b
+     LEFT JOIN matchups m ON m.benchmark_id = b.id
+     LEFT JOIN games g ON g.matchup_id = m.id";
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum BenchmarkKind {
@@ -97,11 +103,6 @@ pub struct RankingSpec<'a> {
 #[derive(Clone, Debug)]
 pub struct RankingEngine {
     build_id: i64,
-    identity: String,
-    pub name: String,
-    pub family: Option<String>,
-    pub version: Option<String>,
-    pub configuration: BTreeMap<String, String>,
     pub config: ResolvedEngine,
 }
 
@@ -351,7 +352,7 @@ impl Database {
         let mut stmt = self
             .conn
             .prepare(
-                "SELECT eb.id, eb.identity, be.name, be.family, be.version, be.configuration_json,
+                "SELECT eb.id, be.name, be.family, be.version, be.configuration_json,
                          eb.command_json, eb.env_json, eb.options_json
                  FROM benchmark_engines be
                  JOIN engine_builds eb ON eb.id = be.engine_build_id
@@ -364,27 +365,25 @@ impl Database {
                 Ok((
                     row.get::<_, i64>(0)?,
                     row.get::<_, String>(1)?,
-                    row.get::<_, String>(2)?,
+                    row.get::<_, Option<String>>(2)?,
                     row.get::<_, Option<String>>(3)?,
-                    row.get::<_, Option<String>>(4)?,
+                    row.get::<_, String>(4)?,
                     row.get::<_, String>(5)?,
                     row.get::<_, String>(6)?,
                     row.get::<_, String>(7)?,
-                    row.get::<_, String>(8)?,
                 ))
             })
             .map_err(|e| format!("query ranking engines: {e}"))?;
         let mut engines = Vec::new();
         for row in rows {
-            let (build_id, identity, name, family, version, configuration, command, env, options) =
+            let (build_id, name, family, version, configuration, command, env, options) =
                 row.map_err(|e| format!("read ranking engine: {e}"))?;
             let configuration: BTreeMap<String, String> = serde_json::from_str(&configuration)
                 .map_err(|e| format!("parse engine display configuration: {e}"))?;
             engines.push(RankingEngine {
                 build_id,
-                identity,
                 config: ResolvedEngine {
-                    name: name.clone(),
+                    name,
                     launch: EngineLaunch::new(
                         serde_json::from_str(&command)
                             .map_err(|e| format!("parse engine command: {e}"))?,
@@ -394,15 +393,11 @@ impl Database {
                             .map_err(|e| format!("parse engine options: {e}"))?,
                     )?,
                     metadata: EngineMetadata {
-                        family: family.clone(),
-                        version: version.clone(),
-                        configuration: configuration.clone(),
+                        family,
+                        version,
+                        configuration,
                     },
                 },
-                name,
-                family,
-                version,
-                configuration,
             });
         }
         let next_batch: i64 = self
@@ -459,8 +454,8 @@ impl Database {
         let mut identities = pool
             .engines
             .iter()
-            .map(|engine| engine.identity.clone())
-            .collect::<HashSet<_>>();
+            .map(|engine| engine_identity(&engine.config))
+            .collect::<Result<HashSet<_>, _>>()?;
         for engine in engines {
             if !identities.insert(engine_identity(engine)?) {
                 return Err(format!(
@@ -522,11 +517,11 @@ impl Database {
         for participant in &pool.engines {
             let config = if apply_options {
                 let config = configs_by_name
-                    .get(participant.name.as_str())
+                    .get(participant.config.name.as_str())
                     .ok_or_else(|| {
                         format!(
                             "no current configuration found for engine {}",
-                            participant.name
+                            participant.config.name
                         )
                     })?;
                 if config.launch.command() != participant.config.launch.command()
@@ -534,7 +529,7 @@ impl Database {
                 {
                     return Err(format!(
                         "refusing to change command or environment for existing engine {}",
-                        participant.name
+                        participant.config.name
                     ));
                 }
                 if participant
@@ -546,16 +541,18 @@ impl Database {
                 {
                     return Err(format!(
                         "refusing to change an existing UBGI option for engine {}",
-                        participant.name
+                        participant.config.name
                     ));
                 }
                 *config
             } else {
-                *configs_by_identity
-                    .get(&participant.identity)
-                    .ok_or_else(|| {
-                        format!("no current metadata found for engine {}", participant.name)
-                    })?
+                let identity = engine_identity(&participant.config)?;
+                *configs_by_identity.get(&identity).ok_or_else(|| {
+                    format!(
+                        "no current metadata found for engine {}",
+                        participant.config.name
+                    )
+                })?
             };
             let configuration = serde_json::to_string(&config.metadata.configuration)
                 .map_err(|e| format!("serialize engine display configuration: {e}"))?;
@@ -581,7 +578,7 @@ impl Database {
                     build_id,
                 ],
             )
-            .map_err(|e| format!("refresh metadata for {}: {e}", participant.name))?;
+            .map_err(|e| format!("refresh metadata for {}: {e}", participant.config.name))?;
         }
         tx.commit()
             .map_err(|e| format!("commit ranking metadata refresh: {e}"))?;
@@ -875,92 +872,38 @@ impl Database {
     }
 
     pub fn list(&self) -> Result<Vec<BenchmarkSummary>, String> {
+        let query = format!(
+            "{BENCHMARK_SUMMARY_PROJECTION}
+             GROUP BY b.id
+             ORDER BY b.id DESC"
+        );
         let mut stmt = self
             .conn
-            .prepare(
-                "SELECT b.id, b.name, b.kind, b.status, b.variant, b.requested_pairs,
-                        COUNT(g.id) / 2, COUNT(g.id)
-                 FROM benchmarks b
-                 LEFT JOIN matchups m ON m.benchmark_id = b.id
-                 LEFT JOIN games g ON g.matchup_id = m.id
-                 GROUP BY b.id
-                 ORDER BY b.id DESC",
-            )
+            .prepare(&query)
             .map_err(|e| format!("prepare benchmark list: {e}"))?;
         let rows = stmt
-            .query_map([], |row| {
-                Ok(BenchmarkSummary {
-                    id: row.get(0)?,
-                    name: row.get(1)?,
-                    kind: row.get(2)?,
-                    status: row.get(3)?,
-                    variant: row.get(4)?,
-                    requested_pairs: row.get::<_, i64>(5)? as usize,
-                    completed_pairs: row.get::<_, i64>(6)? as usize,
-                    games: row.get::<_, i64>(7)? as usize,
-                })
-            })
+            .query_map([], decode_benchmark_summary)
             .map_err(|e| format!("query benchmark list: {e}"))?;
         rows.collect::<Result<Vec<_>, _>>()
             .map_err(|e| format!("read benchmark list: {e}"))
     }
 
     pub fn list_rankings(&self) -> Result<Vec<BenchmarkSummary>, String> {
-        let mut stmt = self
-            .conn
-            .prepare(
-                "SELECT b.id, b.name, b.kind, b.status, b.variant, b.requested_pairs,
-                        COUNT(g.id) / 2, COUNT(g.id)
-                 FROM benchmarks b
-                 LEFT JOIN matchups m ON m.benchmark_id = b.id
-                 LEFT JOIN games g ON g.matchup_id = m.id
-                 WHERE b.kind = 'ranking'
-                 GROUP BY b.id
-                 ORDER BY b.id DESC",
-            )
-            .map_err(|e| format!("prepare ranking list: {e}"))?;
-        let rows = stmt
-            .query_map([], |row| {
-                Ok(BenchmarkSummary {
-                    id: row.get(0)?,
-                    name: row.get(1)?,
-                    kind: row.get(2)?,
-                    status: row.get(3)?,
-                    variant: row.get(4)?,
-                    requested_pairs: row.get::<_, i64>(5)? as usize,
-                    completed_pairs: row.get::<_, i64>(6)? as usize,
-                    games: row.get::<_, i64>(7)? as usize,
-                })
-            })
-            .map_err(|e| format!("query ranking list: {e}"))?;
-        rows.collect::<Result<Vec<_>, _>>()
-            .map_err(|e| format!("read ranking list: {e}"))
+        Ok(self
+            .list()?
+            .into_iter()
+            .filter(|summary| summary.kind == BenchmarkKind::Ranking.as_str())
+            .collect())
     }
 
     pub fn get(&self, id: i64) -> Result<Option<BenchmarkSummary>, String> {
+        let query = format!(
+            "{BENCHMARK_SUMMARY_PROJECTION}
+             WHERE b.id = ?
+             GROUP BY b.id"
+        );
         self.conn
-            .query_row(
-                "SELECT b.id, b.name, b.kind, b.status, b.variant, b.requested_pairs,
-                        COUNT(g.id) / 2, COUNT(g.id)
-                 FROM benchmarks b
-                 LEFT JOIN matchups m ON m.benchmark_id = b.id
-                 LEFT JOIN games g ON g.matchup_id = m.id
-                 WHERE b.id = ?
-                 GROUP BY b.id",
-                params![id],
-                |row| {
-                    Ok(BenchmarkSummary {
-                        id: row.get(0)?,
-                        name: row.get(1)?,
-                        kind: row.get(2)?,
-                        status: row.get(3)?,
-                        variant: row.get(4)?,
-                        requested_pairs: row.get::<_, i64>(5)? as usize,
-                        completed_pairs: row.get::<_, i64>(6)? as usize,
-                        games: row.get::<_, i64>(7)? as usize,
-                    })
-                },
-            )
+            .query_row(&query, params![id], decode_benchmark_summary)
             .optional()
             .map_err(|e| format!("load benchmark {id}: {e}"))
     }
@@ -1005,6 +948,19 @@ impl Database {
         rows.collect::<Result<Vec<_>, _>>()
             .map_err(|e| format!("read benchmark standings: {e}"))
     }
+}
+
+fn decode_benchmark_summary(row: &Row<'_>) -> rusqlite::Result<BenchmarkSummary> {
+    Ok(BenchmarkSummary {
+        id: row.get(0)?,
+        name: row.get(1)?,
+        kind: row.get(2)?,
+        status: row.get(3)?,
+        variant: row.get(4)?,
+        requested_pairs: row.get::<_, i64>(5)? as usize,
+        completed_pairs: row.get::<_, i64>(6)? as usize,
+        games: row.get::<_, i64>(7)? as usize,
+    })
 }
 
 fn insert_benchmark(
@@ -1671,12 +1627,12 @@ mod tests {
         let a = refreshed
             .engines
             .iter()
-            .find(|engine| engine.name == "a")
+            .find(|engine| engine.config.name == "a")
             .unwrap();
 
-        assert_eq!(a.family.as_deref(), Some("family-a"));
-        assert_eq!(a.version.as_deref(), Some("v2"));
-        assert_eq!(a.configuration["model"], "large");
+        assert_eq!(a.config.metadata.family.as_deref(), Some("family-a"));
+        assert_eq!(a.config.metadata.version.as_deref(), Some("v2"));
+        assert_eq!(a.config.metadata.configuration["model"], "large");
         assert_eq!(a.config.launch.options()["engine.ply"], "1");
         assert_ne!(a.build_id, old_a_id);
         let shared_a_id: i64 = store

@@ -15,16 +15,16 @@ pub struct HistoryArgs {
 
 #[derive(Debug, Subcommand)]
 enum HistoryCommand {
-    /// List saved duels and leagues.
+    /// List all saved bgci runs, including rankings.
     List,
-    /// Show one saved duel or league.
+    /// Show one saved bgci run.
     Show { id: i64 },
 }
 
 pub fn run(args: HistoryArgs) -> Result<(), String> {
     let db_path = args.db_path.unwrap_or_else(default_db_path);
     if !db_path.exists() {
-        println!("no saved duels or leagues");
+        println!("no saved bgci runs");
         return Ok(());
     }
     let store = Database::open(db_path)?;
@@ -37,7 +37,7 @@ pub fn run(args: HistoryArgs) -> Result<(), String> {
 fn list(store: &Database) -> Result<(), String> {
     let rows = store.list()?;
     if rows.is_empty() {
-        println!("no saved duels or leagues");
+        println!("no saved bgci runs");
         return Ok(());
     }
     println!(" id  kind    status     pairs       games  name");

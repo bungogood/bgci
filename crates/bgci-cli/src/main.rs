@@ -24,7 +24,7 @@ enum Commands {
     League(LeagueArgs),
     /// Adaptively rank an engine pool over repeated mirrored batches.
     Rank(RankArgs),
-    /// Inspect saved duels and leagues.
+    /// Inspect all saved bgci runs, including rankings.
     History(HistoryArgs),
     /// Validate an engine's UBGI behavior.
     Check(CheckArgs),
