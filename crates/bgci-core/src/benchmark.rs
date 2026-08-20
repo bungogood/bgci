@@ -1251,6 +1251,8 @@ pub fn default_db_path() -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ranking::{fit_rating_model, select_pair_for_model};
+    use std::time::{SystemTime, UNIX_EPOCH};
 
     fn config(name: &str) -> ResolvedEngine {
         ResolvedEngine {
@@ -1287,12 +1289,77 @@ mod tests {
         }
     }
 
+    fn database() -> Database {
+        Database::from_connection(Connection::open_in_memory().unwrap()).unwrap()
+    }
+
+    fn ranking_spec() -> RankingSpec<'static> {
+        RankingSpec {
+            name: "ranking",
+            variant: "backgammon",
+            seed: 42,
+            max_plies: 512,
+            placement_opponents: 1,
+            placement_pairs: 1,
+            established_rd: 80.0,
+        }
+    }
+
+    fn row_counts(store: &Database) -> [i64; 5] {
+        [
+            "benchmarks",
+            "engine_builds",
+            "benchmark_engines",
+            "matchups",
+            "games",
+        ]
+        .map(|table| {
+            store
+                .conn
+                .query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |row| {
+                    row.get(0)
+                })
+                .unwrap()
+        })
+    }
+
+    struct TempDatabase(PathBuf);
+
+    impl TempDatabase {
+        fn new() -> Self {
+            let unique = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos();
+            Self(std::env::temp_dir().join(format!(
+                "bgci-ranking-{}-{unique}.sqlite",
+                std::process::id()
+            )))
+        }
+    }
+
+    impl Drop for TempDatabase {
+        fn drop(&mut self) {
+            let _ = fs::remove_file(&self.0);
+            for suffix in ["-wal", "-shm"] {
+                let _ = fs::remove_file(format!("{}{suffix}", self.0.display()));
+            }
+        }
+    }
+
     #[test]
-    fn stores_a_complete_mirror_pair() {
-        let mut store = Database::from_connection(Connection::open_in_memory().unwrap()).unwrap();
-        let started = store
-            .start_duel(spec(1), &config("a"), &config("b"))
-            .unwrap();
+    fn saved_duel_lifecycle_preserves_metadata_legs_and_standings() {
+        let mut store = database();
+        let mut engine_a = config("a");
+        engine_a.metadata.family = Some("kestral".to_string());
+        engine_a.metadata.version = Some("v2".to_string());
+        engine_a
+            .metadata
+            .configuration
+            .insert("model".to_string(), "large".to_string());
+        let started = store.start_duel(spec(1), &engine_a, &config("b")).unwrap();
+
+        assert!(store.finish_benchmark(started.id).is_err());
         let mut second = game(1);
         second.points_a = -2.0;
         store
@@ -1301,18 +1368,33 @@ mod tests {
         store.finish_benchmark(started.id).unwrap();
 
         let summary = store.get(started.id).unwrap().unwrap();
-        assert_eq!(summary.completed_pairs, 1);
-        assert_eq!(summary.games, 2);
+        assert_eq!(summary.name, "benchmark");
+        assert_eq!(summary.kind, "duel");
+        assert_eq!(summary.variant, "backgammon");
         assert_eq!(summary.status, "completed");
+        assert_eq!(
+            (
+                summary.requested_pairs,
+                summary.completed_pairs,
+                summary.games
+            ),
+            (1, 1, 2)
+        );
         let legs = store
             .conn
-            .prepare("SELECT pair_index, leg FROM games ORDER BY pair_index, leg")
+            .prepare("SELECT pair_index, leg, points_a FROM games ORDER BY pair_index, leg")
             .unwrap()
-            .query_map([], |row| Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?)))
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, i64>(1)?,
+                    row.get::<_, f64>(2)?,
+                ))
+            })
             .unwrap()
             .collect::<Result<Vec<_>, _>>()
             .unwrap();
-        assert_eq!(legs, [(0, 0), (0, 1)]);
+        assert_eq!(legs, [(0, 0, 1.0), (0, 1, -2.0)]);
         let summaries = store.engine_summaries(started.id).unwrap();
         let a = summaries
             .iter()
@@ -1322,396 +1404,195 @@ mod tests {
             .iter()
             .find(|summary| summary.name == "b")
             .unwrap();
-        assert_eq!((a.wins, a.points), (1, -1.0));
-        assert_eq!((b.wins, b.points), (1, 1.0));
-    }
-
-    #[test]
-    fn rejects_duplicate_pair_ingestion() {
-        let mut store = Database::from_connection(Connection::open_in_memory().unwrap()).unwrap();
-        let started = store
-            .start_duel(spec(1), &config("a"), &config("b"))
+        assert_eq!(
+            (a.family.as_deref(), a.role.as_str()),
+            (Some("kestral"), "engine-a")
+        );
+        assert_eq!((a.games, a.wins, a.points), (2, 1, -1.0));
+        assert_eq!((b.games, b.wins, b.points), (2, 1, 1.0));
+        let metadata: (Option<String>, String) = store
+            .conn
+            .query_row(
+                "SELECT version, configuration_json FROM benchmark_engines WHERE name = 'a'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
             .unwrap();
-        store
-            .record_games(started.matchups[0].handle, &[game(0), game(1)])
-            .unwrap();
-
-        assert!(
-            store
-                .record_games(started.matchups[0].handle, &[game(0), game(1)])
-                .is_err()
+        assert_eq!(metadata.0.as_deref(), Some("v2"));
+        assert_eq!(
+            serde_json::from_str::<BTreeMap<String, String>>(&metadata.1).unwrap()["model"],
+            "large"
         );
     }
 
     #[test]
-    fn refuses_to_complete_without_all_pairs() {
-        let mut store = Database::from_connection(Connection::open_in_memory().unwrap()).unwrap();
-        let started = store
-            .start_duel(spec(2), &config("a"), &config("b"))
+    fn game_validation_duplicate_ingestion_and_mid_write_failure_are_atomic() {
+        let mut store = database();
+        let first = store
+            .start_duel(spec(1), &config("a"), &config("b"))
+            .unwrap();
+        let handle = first.matchups[0].handle;
+        let mut wrong_index = game(0);
+        wrong_index.game_idx = 1;
+        assert!(store.record_games(handle, &[wrong_index, game(1)]).is_err());
+        for points in [4.0, 0.5, f64::INFINITY, f64::NAN] {
+            let mut invalid = game(0);
+            invalid.points_a = points;
+            assert!(store.record_games(handle, &[invalid, game(1)]).is_err());
+        }
+        assert_eq!(row_counts(&store)[4], 0);
+        store.record_games(handle, &[game(0), game(1)]).unwrap();
+        assert!(store.record_games(handle, &[game(0), game(1)]).is_err());
+
+        let second = store
+            .start_duel(spec(1), &config("a"), &config("b"))
+            .unwrap();
+        store
+            .conn
+            .execute_batch(&format!(
+                "CREATE TRIGGER reject_second_leg BEFORE INSERT ON games
+                 WHEN NEW.matchup_id = {} AND NEW.leg = 1
+                 BEGIN SELECT RAISE(ABORT, 'second leg rejected'); END;",
+                second.matchups[0].handle.id
+            ))
+            .unwrap();
+        assert!(
+            store
+                .record_games(second.matchups[0].handle, &[game(0), game(1)])
+                .is_err()
+        );
+        let second_games: i64 = store
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM games WHERE matchup_id = ?",
+                params![second.matchups[0].handle.id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(second_games, 0);
+        assert_eq!(row_counts(&store)[4], 2);
+    }
+
+    #[test]
+    fn invalid_duel_and_league_starts_leave_every_table_unchanged() {
+        let mut store = database();
+        let empty = row_counts(&store);
+        let mut unnamed = spec(1);
+        unnamed.name = "  ";
+        assert!(
+            store
+                .start_duel(unnamed, &config("a"), &config("b"))
+                .is_err()
+        );
+        assert_eq!(row_counts(&store), empty);
+        assert!(
+            store
+                .start_duel(spec(1), &config("a"), &config("a"))
+                .is_err()
+        );
+        assert_eq!(row_counts(&store), empty);
+        assert!(store.start_league(spec(1), &[config("only")]).is_err());
+        assert_eq!(row_counts(&store), empty);
+        let first = config("engine");
+        let mut renamed = first.clone();
+        renamed.name = "renamed".to_string();
+        assert!(store.start_league(spec(1), &[first, renamed]).is_err());
+        assert_eq!(row_counts(&store), empty);
+    }
+
+    #[test]
+    fn benchmark_start_rolls_back_after_a_mid_transaction_failure() {
+        let mut store = database();
+        store
+            .conn
+            .execute_batch(
+                "CREATE TRIGGER reject_matchup BEFORE INSERT ON matchups
+                 BEGIN SELECT RAISE(ABORT, 'matchup rejected'); END;",
+            )
             .unwrap();
 
-        assert!(store.finish_benchmark(started.id).is_err());
+        assert!(
+            store
+                .start_duel(spec(1), &config("a"), &config("b"))
+                .is_err()
+        );
+        assert_eq!(row_counts(&store), [0; 5]);
     }
 
     #[test]
-    fn rejects_saved_self_play_without_creating_a_benchmark() {
-        let mut store = Database::from_connection(Connection::open_in_memory().unwrap()).unwrap();
-        let result = store.start_duel(spec(1), &config("a"), &config("a"));
-
-        assert!(result.is_err());
-        assert!(store.list().unwrap().is_empty());
-    }
-
-    #[test]
-    fn league_schedule_preserves_order_indices_and_seeds() {
-        let mut store = Database::from_connection(Connection::open_in_memory().unwrap()).unwrap();
-        let engines = [config("a"), config("b"), config("c")];
-        let started = store.start_league(spec(1), &engines).unwrap();
-
-        assert_eq!(started.matchups.len(), 3);
+    fn league_schedule_has_deterministic_pairs_indices_and_seeds() {
+        let mut store = database();
+        let started = store
+            .start_league(spec(2), &[config("a"), config("b"), config("c")])
+            .unwrap();
         assert_eq!(
             started
                 .matchups
                 .iter()
-                .map(|matchup| (matchup.engine_a, matchup.engine_b))
+                .enumerate()
+                .map(|(index, matchup)| (
+                    matchup.engine_a,
+                    matchup.engine_b,
+                    matchup.handle.seed(),
+                    index,
+                ))
                 .collect::<Vec<_>>(),
-            [(0, 1), (0, 2), (1, 2)]
-        );
-        assert_eq!(started.matchups[0].handle.seed(), seed_for_game(42, 0));
-        assert_eq!(started.matchups[1].handle.seed(), seed_for_game(42, 1));
-        assert_eq!(started.matchups[2].handle.seed(), seed_for_game(42, 2));
-    }
-
-    #[test]
-    fn league_rejects_fewer_than_two_engines_without_mutation() {
-        for engines in [Vec::new(), vec![config("only")]] {
-            let mut store =
-                Database::from_connection(Connection::open_in_memory().unwrap()).unwrap();
-
-            assert!(store.start_league(spec(1), &engines).is_err());
-            assert!(store.list().unwrap().is_empty());
-            let builds: i64 = store
-                .conn
-                .query_row("SELECT COUNT(*) FROM engine_builds", [], |row| row.get(0))
-                .unwrap();
-            assert_eq!(builds, 0);
-        }
-    }
-
-    #[test]
-    fn league_rejects_identical_launches_with_different_names_without_mutation() {
-        let mut store = Database::from_connection(Connection::open_in_memory().unwrap()).unwrap();
-        let first = config("engine");
-        let mut renamed = first.clone();
-        renamed.name = "renamed".to_string();
-
-        assert!(store.start_league(spec(1), &[first, renamed]).is_err());
-        assert!(store.list().unwrap().is_empty());
-        let builds: i64 = store
-            .conn
-            .query_row("SELECT COUNT(*) FROM engine_builds", [], |row| row.get(0))
-            .unwrap();
-        assert_eq!(builds, 0);
-    }
-
-    #[test]
-    fn benchmark_start_is_atomic() {
-        let mut store = Database::from_connection(Connection::open_in_memory().unwrap()).unwrap();
-        let mut invalid = spec(1);
-        invalid.name = "  ";
-
-        assert!(
-            store
-                .start_duel(invalid, &config("a"), &config("b"))
-                .is_err()
-        );
-        assert!(store.list().unwrap().is_empty());
-    }
-
-    #[test]
-    fn rejects_invalid_game_sequence() {
-        let mut store = Database::from_connection(Connection::open_in_memory().unwrap()).unwrap();
-        let started = store
-            .start_duel(spec(1), &config("a"), &config("b"))
-            .unwrap();
-        let mut first = game(0);
-        first.game_idx = 1;
-
-        assert!(
-            store
-                .record_games(started.matchups[0].handle, &[first, game(1)])
-                .is_err()
-        );
-    }
-
-    #[test]
-    fn rejects_noncanonical_points() {
-        let mut store = Database::from_connection(Connection::open_in_memory().unwrap()).unwrap();
-        let started = store
-            .start_duel(spec(1), &config("a"), &config("b"))
-            .unwrap();
-
-        for points_a in [4.0, 0.5, f64::INFINITY, f64::NAN] {
-            let mut invalid = game(0);
-            invalid.points_a = points_a;
-            assert!(
-                store
-                    .record_games(started.matchups[0].handle, &[invalid, game(1)])
-                    .is_err()
-            );
-        }
-    }
-
-    #[test]
-    fn name_and_metadata_are_not_launch_identity() {
-        let first = config("engine");
-        let mut second = first.clone();
-        second.name = "display-name".to_string();
-        second.metadata.family = Some("new-family".to_string());
-        second.metadata.version = Some("v2".to_string());
-        second
-            .metadata
-            .configuration
-            .insert("model".to_string(), "large".to_string());
-
-        assert_eq!(
-            engine_identity(&first).unwrap(),
-            engine_identity(&second).unwrap()
-        );
-    }
-
-    #[test]
-    fn command_environment_and_options_are_launch_identity() {
-        let base = config("engine");
-        let command = ResolvedEngine {
-            launch: EngineLaunch::new(
-                vec!["other".to_string()],
-                Default::default(),
-                Default::default(),
-            )
-            .unwrap(),
-            ..base.clone()
-        };
-        let environment = ResolvedEngine {
-            launch: EngineLaunch::new(
-                vec!["engine".to_string()],
-                BTreeMap::from([("MODE".to_string(), "fast".to_string())]),
-                Default::default(),
-            )
-            .unwrap(),
-            ..base.clone()
-        };
-        let options = ResolvedEngine {
-            launch: EngineLaunch::new(
-                vec!["engine".to_string()],
-                Default::default(),
-                BTreeMap::from([("engine.ply".to_string(), "2".to_string())]),
-            )
-            .unwrap(),
-            ..base.clone()
-        };
-
-        assert_ne!(
-            engine_identity(&base).unwrap(),
-            engine_identity(&command).unwrap()
-        );
-        assert_ne!(
-            engine_identity(&base).unwrap(),
-            engine_identity(&environment).unwrap()
-        );
-        assert_ne!(
-            engine_identity(&base).unwrap(),
-            engine_identity(&options).unwrap()
-        );
-    }
-
-    #[test]
-    fn stores_family_with_benchmark_participant() {
-        let mut store = Database::from_connection(Connection::open_in_memory().unwrap()).unwrap();
-        let mut a = config("a");
-        a.metadata.family = Some("kestral".to_string());
-        let started = store.start_duel(spec(1), &a, &config("b")).unwrap();
-        store
-            .record_games(started.matchups[0].handle, &[game(0), game(1)])
-            .unwrap();
-        let summaries = store.engine_summaries(started.id).unwrap();
-
-        assert_eq!(summaries[0].family.as_deref(), Some("kestral"));
-    }
-
-    #[test]
-    fn ranking_pool_persists_batches_and_resumes() {
-        let mut store = Database::from_connection(Connection::open_in_memory().unwrap()).unwrap();
-        let mut pool = store
-            .start_ranking(
-                RankingSpec {
-                    name: "ranking",
-                    variant: "backgammon",
-                    seed: 42,
-                    max_plies: 512,
-                    placement_opponents: 1,
-                    placement_pairs: 1,
-                    established_rd: 80.0,
-                },
-                &[config("a"), config("b")],
-            )
-            .unwrap();
-        store.resume_ranking(pool.id).unwrap();
-        pool = store.load_ranking(pool.id).unwrap();
-        let matchup = store.start_ranking_batch(&pool, 0, 1, 1).unwrap();
-        let mut incomplete = game(1);
-        incomplete.points_a = 0.0;
-        store.record_games(matchup, &[game(0), incomplete]).unwrap();
-        pool.next_batch += 1;
-        let data = store.ranking_data(&pool).unwrap();
-
-        assert_eq!(data.edges.len(), 1);
-        assert_eq!(data.edges[0].rated_games, 1);
-        assert!((data.edges[0].score_sum_a - 2.0 / 3.0).abs() < 1e-12);
-        assert_eq!(data.pair_counts[0][1], 1);
-        assert_eq!(
-            data.average_decision_time,
-            vec![
-                Some(Duration::from_millis(10)),
-                Some(Duration::from_millis(20))
+            [
+                (0, 1, seed_for_game(42, 0), 0),
+                (0, 2, seed_for_game(42, 1), 1),
+                (1, 2, seed_for_game(42, 2), 2),
             ]
         );
-        assert_eq!(data.last_played_batch, vec![Some(0), Some(0)]);
-        store.pause_ranking(pool.id).unwrap();
-        assert_eq!(store.load_ranking(pool.id).unwrap().status, "paused");
-        store.resume_ranking(pool.id).unwrap();
-        let resumed = store.load_ranking(pool.id).unwrap();
-        assert_eq!(resumed.status, "running");
-        assert_eq!(resumed.next_batch, 1);
-        store.pause_ranking(pool.id).unwrap();
+        let summary = store.get(started.id).unwrap().unwrap();
+        assert_eq!(
+            (summary.kind.as_str(), summary.requested_pairs),
+            ("league", 6)
+        );
+    }
+
+    #[test]
+    fn file_backed_ranking_create_resume_pause_batch_and_empty_retry_lifecycle() {
+        let path = TempDatabase::new();
+        let pool_id = {
+            let mut store = Database::open(&path.0).unwrap();
+            let pool = store
+                .start_ranking(ranking_spec(), &[config("a"), config("b")])
+                .unwrap();
+            assert_eq!(pool.status, "paused");
+            assert_eq!((pool.seed, pool.next_batch, pool.engines.len()), (42, 0, 2));
+            pool.id
+        };
+
+        let mut store = Database::open(&path.0).unwrap();
+        assert_eq!(store.load_ranking_by_name("RANKING").unwrap().id, pool_id);
+        store.resume_ranking(pool_id).unwrap();
+        let pool = store.load_ranking(pool_id).unwrap();
+        assert_eq!(pool.status, "running");
+        let empty = store.start_ranking_batch(&pool, 0, 1, 1).unwrap();
+        store.discard_empty_matchup(empty).unwrap();
+        let retry = store.load_ranking(pool_id).unwrap();
+        assert_eq!(retry.next_batch, 0);
+        let matchup = store.start_ranking_batch(&retry, 0, 1, 1).unwrap();
+        store.record_games(matchup, &[game(0), game(1)]).unwrap();
+        store.pause_ranking(pool_id).unwrap();
         let expanded = store
             .add_ranking_engines("ranking", &[config("c")])
             .unwrap();
+        assert_eq!(
+            (expanded.status.as_str(), expanded.next_batch),
+            ("paused", 1)
+        );
         assert_eq!(expanded.engines.len(), 3);
     }
 
     #[test]
-    fn ranking_refresh_replaces_only_its_immutable_build_snapshot() {
-        let mut store = Database::from_connection(Connection::open_in_memory().unwrap()).unwrap();
-        let pool = ranking_pool(&mut store);
-        let old_a_id = pool.engines[0].build_id;
-        let shared = store
-            .start_duel(
-                BenchmarkSpec {
-                    name: "shared-build-duel",
-                    variant: "backgammon",
-                    seed: 7,
-                    max_plies: 512,
-                    pairs: 1,
-                },
-                &config("a"),
-                &config("b"),
-            )
+    fn ranking_persistence_feeds_canonical_pair_robust_model_selection() {
+        let mut store = database();
+        let created = store
+            .start_ranking(ranking_spec(), &[config("a"), config("b")])
             .unwrap();
-        let matchup = store.start_ranking_batch(&pool, 0, 1, 1).unwrap();
-        store.record_games(matchup, &[game(0), game(1)]).unwrap();
-        store.pause_ranking(pool.id).unwrap();
-        let mut a = config("a");
-        a.metadata.family = Some("family-a".to_string());
-        a.metadata.version = Some("v2".to_string());
-        a.metadata
-            .configuration
-            .insert("model".to_string(), "large".to_string());
-        a.launch
-            .options_mut()
-            .insert("engine.ply".to_string(), "1".to_string());
-
-        let refreshed = store
-            .refresh_ranking_engine_metadata(&pool.name, &[a, config("b")], true)
-            .unwrap();
-        let a = refreshed
-            .engines
-            .iter()
-            .find(|engine| engine.config.name == "a")
-            .unwrap();
-
-        assert_eq!(a.config.metadata.family.as_deref(), Some("family-a"));
-        assert_eq!(a.config.metadata.version.as_deref(), Some("v2"));
-        assert_eq!(a.config.metadata.configuration["model"], "large");
-        assert_eq!(a.config.launch.options()["engine.ply"], "1");
-        assert_ne!(a.build_id, old_a_id);
-        let shared_a_id: i64 = store
-            .conn
-            .query_row(
-                "SELECT engine_a_id FROM matchups WHERE benchmark_id = ?",
-                params![shared.id],
-                |row| row.get(0),
-            )
-            .unwrap();
-        assert_eq!(shared_a_id, old_a_id);
-
-        let old_options: String = store
-            .conn
-            .query_row(
-                "SELECT options_json FROM engine_builds WHERE id = ?",
-                params![old_a_id],
-                |row| row.get(0),
-            )
-            .unwrap();
-        assert_eq!(old_options, "{}");
-
-        let data = store.ranking_data(&refreshed).unwrap();
-        assert_eq!(data.edges.len(), 1);
-        assert_eq!(data.edges[0].rated_games, 2);
-        assert_eq!(data.pair_counts[0][1], 1);
-    }
-
-    #[test]
-    fn empty_ranking_batch_can_be_retried() {
-        let mut store = Database::from_connection(Connection::open_in_memory().unwrap()).unwrap();
-        let mut pool = store
-            .start_ranking(
-                RankingSpec {
-                    name: "ranking",
-                    variant: "backgammon",
-                    seed: 42,
-                    max_plies: 512,
-                    placement_opponents: 1,
-                    placement_pairs: 1,
-                    established_rd: 80.0,
-                },
-                &[config("a"), config("b")],
-            )
-            .unwrap();
-        store.resume_ranking(pool.id).unwrap();
-        pool = store.load_ranking(pool.id).unwrap();
-        let failed = store.start_ranking_batch(&pool, 0, 1, 1).unwrap();
-
-        store.discard_empty_matchup(failed).unwrap();
-
-        let retry_pool = store.load_ranking(pool.id).unwrap();
-        assert_eq!(retry_pool.next_batch, 0);
-        assert!(store.start_ranking_batch(&retry_pool, 0, 1, 1).is_ok());
-    }
-
-    fn ranking_pool(store: &mut Database) -> RankingPool {
-        let pool = store
-            .start_ranking(
-                RankingSpec {
-                    name: "test-ranking",
-                    variant: "backgammon",
-                    seed: 42,
-                    max_plies: 512,
-                    placement_opponents: 1,
-                    placement_pairs: 1,
-                    established_rd: 80.0,
-                },
-                &[config("a"), config("b")],
-            )
-            .unwrap();
-        store.resume_ranking(pool.id).unwrap();
-        store.load_ranking(pool.id).unwrap()
-    }
-
-    #[test]
-    fn ranking_aggregates_are_canonical_and_pair_robust() {
-        let mut store = Database::from_connection(Connection::open_in_memory().unwrap()).unwrap();
-        let pool = ranking_pool(&mut store);
+        store.resume_ranking(created.id).unwrap();
+        let pool = store.load_ranking(created.id).unwrap();
         let matchup = store.start_ranking_batch(&pool, 1, 0, 2).unwrap();
         store
             .record_games(matchup, &[game(0), game(1), game(2), game(3)])
@@ -1735,49 +1616,83 @@ mod tests {
             ]
         );
         assert_eq!(data.last_played_batch, vec![Some(0), Some(0)]);
+        let model = fit_rating_model(pool.engines.len(), &data.edges);
+        assert_eq!(
+            select_pair_for_model(
+                &model,
+                &data.pair_counts,
+                &data.average_decision_time,
+                &data.last_played_batch,
+                pool.next_batch + 1,
+                pool.placement_opponents,
+                pool.placement_pairs,
+            ),
+            Some((0, 1))
+        );
     }
 
     #[test]
-    fn game_insert_failure_rolls_back_the_matchup() {
-        let mut store = Database::from_connection(Connection::open_in_memory().unwrap()).unwrap();
-        let pool = ranking_pool(&mut store);
+    fn ranking_refresh_replaces_only_its_immutable_build_snapshot() {
+        let mut store = database();
+        let created = store
+            .start_ranking(ranking_spec(), &[config("a"), config("b")])
+            .unwrap();
+        store.resume_ranking(created.id).unwrap();
+        let pool = store.load_ranking(created.id).unwrap();
+        let old_a_id = pool.engines[0].build_id;
+        let shared = store
+            .start_duel(spec(1), &config("a"), &config("b"))
+            .unwrap();
         let matchup = store.start_ranking_batch(&pool, 0, 1, 1).unwrap();
-        store
-            .conn
-            .execute_batch(
-                "CREATE TRIGGER reject_second_leg
-                 BEFORE INSERT ON games WHEN NEW.leg = 1
-                 BEGIN SELECT RAISE(ABORT, 'second leg rejected'); END;",
-            )
-            .unwrap();
+        store.record_games(matchup, &[game(0), game(1)]).unwrap();
+        store.pause_ranking(pool.id).unwrap();
+        let mut a = config("a");
+        a.metadata.family = Some("family-a".to_string());
+        a.metadata.version = Some("v2".to_string());
+        a.metadata
+            .configuration
+            .insert("model".to_string(), "large".to_string());
+        a.launch
+            .options_mut()
+            .insert("engine.ply".to_string(), "1".to_string());
 
-        assert!(store.record_games(matchup, &[game(0), game(1)]).is_err());
-        let game_count: i64 = store
-            .conn
-            .query_row("SELECT COUNT(*) FROM games", [], |row| row.get(0))
+        let refreshed = store
+            .refresh_ranking_engine_metadata(&pool.name, &[a, config("b")], true)
             .unwrap();
-        assert_eq!(game_count, 0);
-    }
-
-    #[test]
-    fn creates_the_current_schema_on_an_empty_database() {
-        let conn = Connection::open_in_memory().unwrap();
-        let store = Database::from_connection(conn).unwrap();
-        let version: i64 = store
-            .conn
-            .query_row("PRAGMA user_version", [], |row| row.get(0))
+        let refreshed_a = refreshed
+            .engines
+            .iter()
+            .find(|engine| engine.config.name == "a")
             .unwrap();
-        assert_eq!(version, SCHEMA_VERSION);
-        let tables: i64 = store
+        assert_ne!(refreshed_a.build_id, old_a_id);
+        assert_eq!(
+            refreshed_a.config.metadata.family.as_deref(),
+            Some("family-a")
+        );
+        assert_eq!(refreshed_a.config.metadata.version.as_deref(), Some("v2"));
+        assert_eq!(refreshed_a.config.metadata.configuration["model"], "large");
+        assert_eq!(refreshed_a.config.launch.options()["engine.ply"], "1");
+        let shared_a_id: i64 = store
             .conn
             .query_row(
-                "SELECT COUNT(*) FROM sqlite_schema
-                 WHERE type = 'table' AND name IN ('games', 'matchups', 'benchmarks')",
-                [],
+                "SELECT engine_a_id FROM matchups WHERE benchmark_id = ?",
+                params![shared.id],
                 |row| row.get(0),
             )
             .unwrap();
-        assert_eq!(tables, 3);
+        assert_eq!(shared_a_id, old_a_id);
+        let old_options: String = store
+            .conn
+            .query_row(
+                "SELECT options_json FROM engine_builds WHERE id = ?",
+                params![old_a_id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(old_options, "{}");
+        let data = store.ranking_data(&refreshed).unwrap();
+        assert_eq!((data.edges.len(), data.edges[0].rated_games), (1, 2));
+        assert_eq!(data.pair_counts[0][1], 1);
     }
 
     #[test]

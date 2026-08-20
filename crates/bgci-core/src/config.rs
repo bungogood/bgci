@@ -675,80 +675,25 @@ mod tests {
     };
 
     #[test]
-    fn unresolved_matchup_toml_retains_flat_engine_shape() {
-        let config: MatchupConfig = toml::from_str(
-            r#"
-            pairs = 3
-            [engine_a]
-            name = "alias"
-            engine = "random"
-            family = "test"
-            version = "v1"
-            configuration = { model = "small" }
-            env = { MODE = "fast" }
-            options = { "engine.ply" = "1" }
-            [engine_b]
-            name = "command"
-            command = ["engine", "--flag"]
-            "#,
-        )
-        .unwrap();
-
-        assert_eq!(config.engine_a.engine.as_deref(), Some("random"));
-        assert_eq!(config.engine_b.command, ["engine", "--flag"]);
-    }
-
-    #[test]
-    fn successful_resolution_has_launch_and_no_alias_state() {
-        let config: MatchupConfig = toml::from_str(
+    fn resolves_direct_commands_and_canonical_engine_specs() {
+        let matchup: MatchupConfig = toml::from_str(
             r#"
             [engine_a]
-            name = "a"
+            name = "scalar"
             command = "engine-a"
             [engine_b]
-            name = "b"
+            name = "array"
             command = ["engine-b", "--flag"]
             "#,
         )
         .unwrap();
-
         let resolved_a =
-            resolve_engine_input_from_registry(config.engine_a, &Default::default()).unwrap();
+            resolve_engine_input_from_registry(matchup.engine_a, &Default::default()).unwrap();
         let resolved_b =
-            resolve_engine_input_from_registry(config.engine_b, &Default::default()).unwrap();
+            resolve_engine_input_from_registry(matchup.engine_b, &Default::default()).unwrap();
 
         assert_eq!(resolved_a.launch.command(), ["engine-a"]);
         assert_eq!(resolved_b.launch.command(), ["engine-b", "--flag"]);
-    }
-
-    #[test]
-    fn parses_family_url_command_and_options() {
-        let config: UserConfig = toml::from_str(
-            r#"
-            [engines.kestral-light]
-            family = "kestral"
-            version = "v2"
-            configuration = { model = "light" }
-            url = "https://example.com/kestral"
-            command = ["/opt/kestral", "--model", "light.bin"]
-
-            [engines.kestral-light.options]
-            "engine.ply" = "1"
-            "#,
-        )
-        .unwrap();
-        let engine = &config.engines["kestral-light"];
-
-        assert_eq!(engine.family.as_deref(), Some("kestral"));
-        assert_eq!(engine.version.as_deref(), Some("v2"));
-        assert_eq!(engine.configuration["model"], "light");
-        assert_eq!(engine.url.as_deref(), Some("https://example.com/kestral"));
-        assert_eq!(engine.command[0], "/opt/kestral");
-        assert_eq!(engine.options["engine.ply"], "1");
-    }
-
-    #[test]
-    fn canonical_specs_round_trip_through_family_metadata() {
         let config: UserConfig = toml::from_str(
             r#"
             [engines.hedgehog-expectimax]
@@ -799,6 +744,8 @@ mod tests {
         let kestral = "kestral:ply=1,model=prob5-best";
         let kestral_config = resolve_engine_spec_from_registry(kestral, &config.engines).unwrap();
         assert_eq!(kestral_config.name, kestral);
+        assert_eq!(kestral_config.metadata.family.as_deref(), Some("kestral"));
+        assert_eq!(kestral_config.metadata.configuration["model"], "prob5-best");
         assert!(!kestral_config.launch.options().contains_key("engine.model"));
         assert_eq!(kestral_config.launch.options()["engine.ply"], "1");
 

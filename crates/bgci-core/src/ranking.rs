@@ -863,73 +863,83 @@ mod tests {
         values.into_iter().map(Vec::from).collect()
     }
 
-    fn edge(a: usize, b: usize, games: usize, score: f64) -> RankingEdge {
+    // Each aggregate represents mirrored two-game pairs with pair scores 2, 1, or 0.
+    fn pairs(a: usize, b: usize, wins: usize, splits: usize, losses: usize) -> RankingEdge {
+        let completed_pairs = wins + splits + losses;
+        let score_sum_a = (2 * wins + splits) as f64;
         RankingEdge {
             engine_a: a,
             engine_b: b,
-            rated_games: games,
-            score_sum_a: score,
-            completed_pairs: games,
-            sum_m_squared: games as f64,
-            sum_m_score: score,
-            sum_score_squared: score,
+            rated_games: 2 * completed_pairs,
+            score_sum_a,
+            completed_pairs,
+            sum_m_squared: (4 * completed_pairs) as f64,
+            sum_m_score: 2.0 * score_sum_a,
+            sum_score_squared: (4 * wins + splits) as f64,
         }
     }
 
     #[test]
-    fn stronger_engines_rank_above_weaker_engines() {
+    fn fit_orders_engines_by_points_and_reports_rejected_edges() {
+        let invalid = RankingEdge {
+            score_sum_a: f64::NAN,
+            ..pairs(0, 1, 0, 5, 0)
+        };
         let model = fit_rating_model(
             3,
             &[
-                edge(0, 1, 40, 40.0),
-                edge(0, 2, 40, 40.0),
-                edge(1, 2, 40, 40.0),
+                pairs(0, 1, 20, 0, 0),
+                pairs(0, 2, 20, 0, 0),
+                pairs(1, 2, 20, 0, 0),
+                invalid,
             ],
         );
-        let ratings = model.ratings;
 
-        assert!(ratings[0].elo > ratings[1].elo);
-        assert!(ratings[1].elo > ratings[2].elo);
-        assert!((ratings.iter().map(|rating| rating.elo).sum::<f64>() / 3.0 - 1500.0).abs() < 1e-9);
-        assert_eq!(ratings[0].games, 80);
-    }
-
-    #[test]
-    fn fit_diagnostics_report_healthy_fit_and_rejected_edges() {
-        let invalid = RankingEdge {
-            score_sum_a: f64::NAN,
-            ..edge(0, 1, 10, 5.0)
-        };
-        let model = fit_rating_model(2, &[edge(0, 1, 10, 6.0), invalid]);
-
+        assert!(model.ratings[0].elo > model.ratings[1].elo);
+        assert!(model.ratings[1].elo > model.ratings[2].elo);
+        assert!((model.ratings.iter().map(|r| r.elo).sum::<f64>() / 3.0 - 1500.0).abs() < 1e-9);
+        assert_eq!(model.ratings[0].games, 80);
         assert!(model.fit_diagnostics.reason.is_healthy());
         assert!(model.fit_diagnostics.iterations > 0);
         assert_eq!(model.fit_diagnostics.rejected_edges, 1);
         assert!(!model.fit_diagnostics.covariance_inverse_fallback);
         assert_eq!(model.fit_diagnostics.sanitized_covariance_entries, 0);
+
+        let point_loser = fit_rating_model(2, &[pairs(0, 1, 1, 2, 2)]);
+        assert!(point_loser.ratings[0].elo < point_loser.ratings[1].elo);
     }
 
     #[test]
-    fn point_losses_outweigh_more_normal_wins() {
-        let ratings = fit_rating_model(2, &[edge(0, 1, 10, 4.0)]).ratings;
+    fn permuting_engine_indices_permutes_ratings_and_covariance() {
+        let original = fit_rating_model(3, &[pairs(0, 1, 4, 4, 2), pairs(1, 2, 2, 3, 5)]);
+        let permuted = fit_rating_model(3, &[pairs(2, 0, 4, 4, 2), pairs(0, 1, 2, 3, 5)]);
+        let permutation = [2, 0, 1];
 
-        assert!(ratings[0].elo < ratings[1].elo);
+        let mut largest_elo_delta = 0.0_f64;
+        let mut largest_covariance_delta = 0.0_f64;
+        for old in 0..3 {
+            largest_elo_delta = largest_elo_delta
+                .max((original.ratings[old].elo - permuted.ratings[permutation[old]].elo).abs());
+            for other in 0..3 {
+                largest_covariance_delta = largest_covariance_delta.max(
+                    (original.covariance[old][other]
+                        - permuted.covariance[permutation[old]][permutation[other]])
+                        .abs(),
+                );
+            }
+        }
+        assert!(largest_elo_delta < 1e-6, "Elo delta: {largest_elo_delta}");
+        assert!(
+            largest_covariance_delta < 1e-6,
+            "covariance delta: {largest_covariance_delta}"
+        );
     }
 
     #[test]
-    fn uncertainty_continues_falling_with_more_games() {
-        let sparse = fit_rating_model(2, &[edge(0, 1, 20, 10.0)]);
-        let dense = fit_rating_model(2, &[edge(0, 1, 2_000, 1_000.0)]);
-
-        assert!(dense.contrast_variance(0, 1) < sparse.contrast_variance(0, 1));
-    }
-
-    #[test]
-    fn covariance_is_symmetric_centered_and_finite() {
-        let model = fit_rating_model(3, &[edge(0, 1, 20, 12.0), edge(1, 2, 15, 6.0)]);
-
+    fn covariance_is_well_formed_and_matches_two_engine_oracle() {
+        let model = fit_rating_model(3, &[pairs(0, 1, 6, 8, 6), pairs(1, 2, 4, 7, 4)]);
         for row in 0..3 {
-            assert!(model.covariance[row][row].is_finite());
+            assert!(model.covariance[row].iter().all(|value| value.is_finite()));
             assert!(model.covariance[row][row] >= 0.0);
             assert!(model.covariance[row].iter().sum::<f64>().abs() < 1e-8);
             for column in 0..3 {
@@ -938,119 +948,48 @@ mod tests {
                 );
             }
         }
-    }
 
-    #[test]
-    fn two_engine_contrast_matches_balanced_analytic_model() {
-        let model = fit_rating_model(2, &[edge(0, 1, 2, 1.0)]);
+        let two_engine = fit_rating_model(2, &[pairs(0, 1, 1, 0, 1)]);
         let prior_precision = ((PRIOR_RD * ELO_TO_LOG_ODDS).powi(2)).recip();
         let robust_weight = 2.0 / (2.0 + ROBUST_COVARIANCE_PRIOR_PAIRS);
-        let meat_edge = (1.0 - robust_weight) * 0.5 + robust_weight;
+        let meat_edge = (1.0 - robust_weight) + robust_weight * 4.0;
         let expected = 2.0 * (prior_precision + 2.0 * meat_edge)
-            / (prior_precision + 1.0).powi(2)
+            / (prior_precision + 2.0).powi(2)
             / ELO_TO_LOG_ODDS.powi(2);
 
-        assert!((model.ratings[0].elo - 1500.0).abs() < 1e-10);
-        assert!((model.contrast_variance(0, 1) - expected).abs() < 1e-8);
-        assert_eq!(model.contrast_variance(0, 0), 0.0);
-        assert!(model.contrast_variance(0, 2).is_nan());
+        assert!((two_engine.ratings[0].elo - 1500.0).abs() < 1e-10);
+        assert!((two_engine.contrast_variance(0, 1) - expected).abs() < 1e-8);
     }
 
     #[test]
-    fn opponent_graph_reduces_indirect_contrast_uncertainty() {
-        let chain = fit_rating_model(3, &[edge(0, 1, 20, 10.0), edge(1, 2, 20, 10.0)]);
+    fn uncertainty_responds_to_samples_opponent_graph_and_pair_clustering() {
+        let sparse = fit_rating_model(2, &[pairs(0, 1, 5, 0, 5)]);
+        let dense = fit_rating_model(2, &[pairs(0, 1, 500, 0, 500)]);
+        assert!(dense.contrast_variance(0, 1) < sparse.contrast_variance(0, 1));
+
+        let chain = fit_rating_model(3, &[pairs(0, 1, 5, 0, 5), pairs(1, 2, 5, 0, 5)]);
         let triangle = fit_rating_model(
             3,
             &[
-                edge(0, 1, 20, 10.0),
-                edge(1, 2, 20, 10.0),
-                edge(0, 2, 20, 10.0),
+                pairs(0, 1, 5, 0, 5),
+                pairs(1, 2, 5, 0, 5),
+                pairs(0, 2, 5, 0, 5),
             ],
         );
-
         assert!(triangle.contrast_variance(0, 2) < chain.contrast_variance(0, 2));
+
+        let stable_pairs = fit_rating_model(2, &[pairs(0, 1, 0, 20, 0)]);
+        let correlated_pairs = fit_rating_model(2, &[pairs(0, 1, 10, 0, 10)]);
+        assert_eq!(stable_pairs.ratings[0].elo, correlated_pairs.ratings[0].elo);
+        assert!(correlated_pairs.contrast_variance(0, 1) > stable_pairs.contrast_variance(0, 1));
     }
 
     #[test]
-    fn pair_cluster_moments_change_covariance_not_point_estimates() {
-        let independent = RankingEdge {
-            engine_a: 0,
-            engine_b: 1,
-            rated_games: 4,
-            score_sum_a: 2.0,
-            completed_pairs: 4,
-            sum_m_squared: 4.0,
-            sum_m_score: 2.0,
-            sum_score_squared: 2.0,
-        };
-        let one_pair = RankingEdge {
-            completed_pairs: 1,
-            sum_m_squared: 16.0,
-            sum_m_score: 8.0,
-            sum_score_squared: 4.0,
-            ..independent
-        };
-
-        let independent = fit_rating_model(2, &[independent]);
-        let clustered = fit_rating_model(2, &[one_pair]);
-
-        assert_eq!(independent.ratings[0].elo, clustered.ratings[0].elo);
-        assert!(clustered.contrast_variance(0, 1) < independent.contrast_variance(0, 1));
-    }
-
-    #[test]
-    fn one_balanced_pair_keeps_substantial_prior_uncertainty() {
-        let balanced_pair = RankingEdge {
-            engine_a: 0,
-            engine_b: 1,
-            rated_games: 2,
-            score_sum_a: 1.0,
-            completed_pairs: 1,
-            sum_m_squared: 4.0,
-            sum_m_score: 2.0,
-            sum_score_squared: 1.0,
-        };
-
-        let model = fit_rating_model(2, &[balanced_pair]);
-
-        assert!(model.contrast_variance(0, 1).sqrt() > 150.0);
-    }
-
-    #[test]
-    fn diagnostics_identify_cycle_space_and_matchup_residuals() {
-        let edges = [
-            edge(0, 1, 100, 60.0),
-            edge(1, 2, 100, 60.0),
-            edge(0, 2, 100, 40.0),
-        ];
-        let model = fit_rating_model(3, &edges);
-
-        let diagnostics = transitivity_diagnostics(&model, &edges, 30);
-
-        assert_eq!(diagnostics.observed_edges, 3);
-        assert_eq!(diagnostics.possible_edges, 3);
-        assert_eq!(diagnostics.connected_components, 1);
-        assert_eq!(diagnostics.cycle_degrees, 1);
-        assert_eq!(diagnostics.residuals.len(), 3);
-        assert!(
-            diagnostics
-                .residuals
-                .iter()
-                .all(|residual| residual.residual_ppg.abs() > 0.5)
-        );
-    }
-
-    #[test]
-    fn full_model_handles_no_games_and_disconnected_engines() {
+    fn empty_and_disconnected_models_retain_prior_uncertainty() {
         let empty = fit_rating_model(3, &[]);
         assert!(empty.fit_diagnostics.reason.is_healthy());
         assert!(empty.ratings.iter().all(|rating| rating.elo == 1500.0));
-        assert!(
-            empty
-                .ratings
-                .iter()
-                .all(|rating| (rating.rd - PRIOR_RD).abs() < 1e-8)
-        );
+        assert!(empty.ratings.iter().all(|r| (r.rd - PRIOR_RD).abs() < 1e-8));
         assert!(
             empty
                 .covariance
@@ -1059,241 +998,180 @@ mod tests {
                 .all(|value| value.is_finite())
         );
 
-        let disconnected = fit_rating_model(4, &[edge(0, 1, 1, 1.0)]);
+        let disconnected = fit_rating_model(4, &[pairs(0, 1, 1, 0, 0)]);
         assert_eq!(disconnected.ratings[2].elo, 1500.0);
         assert_eq!(disconnected.ratings[3].elo, 1500.0);
         assert_eq!(disconnected.ratings[2].games, 0);
         assert!((disconnected.ratings[2].rd - PRIOR_RD).abs() < 1e-8);
         assert!(disconnected.contrast_variance(2, 3) > 0.0);
 
-        let connected = fit_rating_model(2, &[edge(0, 1, 100, 50.0)]);
-        let with_new_engine = fit_rating_model(3, &[edge(0, 1, 100, 50.0)]);
+        let connected = fit_rating_model(2, &[pairs(0, 1, 25, 50, 25)]);
+        let with_new_engine = fit_rating_model(3, &[pairs(0, 1, 25, 50, 25)]);
         assert!((connected.ratings[0].rd - with_new_engine.ratings[0].rd).abs() < 1e-8);
     }
 
     #[test]
-    fn permuting_engine_indices_permutes_the_model() {
-        let original = fit_rating_model(3, &[edge(0, 1, 12, 8.0), edge(1, 2, 10, 3.0)]);
-        let permuted = fit_rating_model(3, &[edge(2, 0, 12, 8.0), edge(0, 1, 10, 3.0)]);
-        let permutation = [2, 0, 1];
+    fn diagnostics_expose_cycle_space_and_large_matchup_residuals() {
+        let edges = [
+            pairs(0, 1, 40, 40, 20),
+            pairs(1, 2, 40, 40, 20),
+            pairs(0, 2, 20, 40, 40),
+        ];
+        let diagnostics = transitivity_diagnostics(&fit_rating_model(3, &edges), &edges, 30);
 
-        for old in 0..3 {
-            assert!(
-                (original.ratings[old].elo - permuted.ratings[permutation[old]].elo).abs() < 1e-8
+        assert_eq!(
+            (
+                diagnostics.observed_edges,
+                diagnostics.possible_edges,
+                diagnostics.connected_components,
+                diagnostics.cycle_degrees,
+                diagnostics.residuals.len(),
+            ),
+            (3, 3, 1, 1, 3)
+        );
+        assert!(
+            diagnostics
+                .residuals
+                .iter()
+                .all(|r| r.residual_ppg.abs() > 0.5)
+        );
+        assert!(
+            diagnostics
+                .residuals
+                .iter()
+                .all(|r| r.standardized_residual.is_some())
+        );
+    }
+
+    #[test]
+    fn scheduler_balances_information_cost_saturation_starvation_and_ties() {
+        let equal_counts = counts([[0, 3, 3], [3, 0, 3], [3, 3, 0]]);
+        let mut mismatch = fit_rating_model(3, &[]);
+        mismatch.ratings[0].elo = 1100.0;
+        mismatch.ratings[2].elo = 1550.0;
+        let mut shuffled_tie = fit_rating_model(3, &[]);
+        shuffled_tie.ratings.rotate_right(1);
+        let saturated = fit_rating_model(4, &[pairs(0, 1, 500, 0, 500)]);
+        let cheap_saturated = fit_rating_model(4, &[pairs(2, 3, 500, 0, 500)]);
+
+        let cases = vec![
+            (
+                "mismatch",
+                mismatch,
+                equal_counts.clone(),
+                vec![None; 3],
+                vec![None; 3],
+                0,
+                (1, 2),
+            ),
+            (
+                "stable tie",
+                shuffled_tie,
+                equal_counts.clone(),
+                vec![None; 3],
+                vec![None; 3],
+                0,
+                (0, 1),
+            ),
+            (
+                "runtime cost",
+                fit_rating_model(3, &[]),
+                equal_counts.clone(),
+                vec![
+                    Some(Duration::from_millis(10)),
+                    Some(Duration::from_millis(10)),
+                    Some(Duration::from_secs(1)),
+                ],
+                vec![Some(9); 3],
+                10,
+                (0, 1),
+            ),
+            (
+                "saturated pair",
+                saturated,
+                vec![vec![0; 4]; 4],
+                vec![Some(Duration::from_millis(1)); 4],
+                vec![Some(9); 4],
+                10,
+                (2, 3),
+            ),
+            (
+                "cheap saturation",
+                cheap_saturated,
+                vec![vec![0; 4]; 4],
+                vec![
+                    Some(Duration::from_millis(20)),
+                    Some(Duration::from_millis(20)),
+                    Some(Duration::from_micros(100)),
+                    Some(Duration::from_micros(100)),
+                ],
+                vec![Some(9); 4],
+                10,
+                (0, 1),
+            ),
+            (
+                "starvation guard",
+                fit_rating_model(3, &[]),
+                equal_counts,
+                vec![
+                    Some(Duration::from_millis(10)),
+                    Some(Duration::from_millis(10)),
+                    Some(Duration::from_secs(1)),
+                ],
+                vec![Some(24), Some(24), Some(5)],
+                25,
+                (0, 2),
+            ),
+        ];
+
+        for (name, model, pair_counts, costs, last_played, next_batch, expected) in cases {
+            assert_eq!(
+                select_pair_for_model(&model, &pair_counts, &costs, &last_played, next_batch, 0, 0,),
+                Some(expected),
+                "{name}"
             );
-            for other in 0..3 {
-                assert!(
-                    (original.covariance[old][other]
-                        - permuted.covariance[permutation[old]][permutation[other]])
-                        .abs()
-                        < 1e-8
-                );
-            }
         }
     }
 
     #[test]
-    fn information_selection_avoids_a_gross_mismatch() {
-        let mut model = fit_rating_model(3, &[]);
-        model.ratings[0].elo = 1100.0;
-        model.ratings[2].elo = 1550.0;
-        let pair_counts = counts([[0, 4, 4], [4, 0, 4], [4, 4, 0]]);
-
-        assert_eq!(
-            select_pair_for_model(&model, &pair_counts, &[None; 3], &[None; 3], 0, 0, 0),
-            Some((1, 2))
-        );
-    }
-
-    #[test]
-    fn selection_ties_are_stable_by_engine_index() {
-        let mut model = fit_rating_model(3, &[]);
-        model.ratings.rotate_right(1);
-        let pair_counts = counts([[0, 3, 3], [3, 0, 3], [3, 3, 0]]);
-
-        assert_eq!(
-            select_pair_for_model(&model, &pair_counts, &[None; 3], &[None; 3], 0, 0, 0),
-            Some((0, 1))
-        );
-    }
-
-    #[test]
-    fn information_selection_penalizes_slow_matchups() {
-        let model = fit_rating_model(3, &[]);
-        let pair_counts = counts([[0, 3, 3], [3, 0, 3], [3, 3, 0]]);
-
-        assert_eq!(
-            select_pair_for_model(
-                &model,
-                &pair_counts,
-                &[
-                    Some(Duration::from_millis(10)),
-                    Some(Duration::from_millis(10)),
-                    Some(Duration::from_secs(1))
-                ],
-                &[Some(9); 3],
-                10,
-                0,
-                0,
-            ),
-            Some((0, 1))
-        );
-    }
-
-    #[test]
-    fn cheap_saturated_engines_do_not_crowd_out_uncertain_engines() {
-        let model = fit_rating_model(4, &[edge(2, 3, 2_000, 1_000.0)]);
-        let pair_counts = vec![vec![0; 4]; 4];
-
-        assert_eq!(
-            select_pair_for_model(
-                &model,
-                &pair_counts,
-                &[
-                    Some(Duration::from_millis(20)),
-                    Some(Duration::from_millis(20)),
-                    Some(Duration::from_micros(100)),
-                    Some(Duration::from_micros(100))
-                ],
-                &[Some(9); 4],
-                10,
-                0,
-                0,
-            ),
-            Some((0, 1))
-        );
-    }
-
-    #[test]
-    fn information_selection_moves_on_from_saturated_pair() {
-        let model = fit_rating_model(4, &[edge(0, 1, 2_000, 1_000.0)]);
-        let pair_counts = vec![vec![0; 4]; 4];
-
-        assert_eq!(
-            select_pair_for_model(
-                &model,
-                &pair_counts,
-                &[Some(Duration::from_millis(1)); 4],
-                &[Some(9); 4],
-                10,
-                0,
-                0,
-            ),
-            Some((2, 3))
-        );
-    }
-
-    #[test]
-    fn idle_engine_is_not_starved_by_runtime_cost() {
-        let model = fit_rating_model(3, &[]);
-        let pair_counts = counts([[0, 3, 3], [3, 0, 3], [3, 3, 0]]);
-
-        assert_eq!(
-            select_pair_for_model(
-                &model,
-                &pair_counts,
-                &[
-                    Some(Duration::from_millis(10)),
-                    Some(Duration::from_millis(10)),
-                    Some(Duration::from_secs(1))
-                ],
-                &[Some(24), Some(24), Some(5)],
-                25,
-                0,
-                0,
-            ),
-            Some((0, 2))
-        );
-    }
-
-    #[test]
-    fn selection_rejects_malformed_inputs() {
-        let duplicate = RatingModel {
-            ratings: vec![rating(0, 1500.0, 100.0), rating(0, 1500.0, 100.0)],
-            covariance: vec![vec![1.0]],
-            fit_diagnostics: FitDiagnostics {
-                reason: FitReason::NoObservations,
-                iterations: 0,
-                rejected_edges: 0,
-                covariance_inverse_fallback: false,
-                sanitized_covariance_entries: 0,
-            },
-        };
-        assert_eq!(
-            select_pair_for_model(&duplicate, &[vec![0]], &[None], &[None], 0, 0, 0),
-            None
-        );
-
-        let model = fit_rating_model(2, &[]);
-        assert_eq!(
-            select_pair_for_model(
-                &model,
-                &[vec![0, 1], vec![2, 0]],
-                &[None; 2],
-                &[None; 2],
-                0,
-                0,
-                0,
-            ),
-            None
-        );
-        let one_engine = fit_rating_model(1, &[]);
-        assert_eq!(
-            select_pair_for_model(&one_engine, &[vec![0]], &[None], &[None], 0, 0, 0),
-            None
-        );
-    }
-
-    #[test]
-    fn placement_does_not_require_every_pair() {
+    fn placement_and_provisional_status_use_opponent_diversity_and_uncertainty() {
         let model = fit_rating_model(4, &[]);
-        let pair_counts = vec![
+        let established = vec![
             vec![0, 20, 20, 0],
             vec![20, 0, 0, 0],
             vec![20, 0, 0, 0],
             vec![0, 0, 0, 0],
         ];
-
         assert_eq!(
-            select_pair_for_model(&model, &pair_counts, &[None; 4], &[None; 4], 0, 2, 20),
+            select_pair_for_model(&model, &established, &[None; 4], &[None; 4], 0, 2, 20),
             Some((1, 2))
         );
-    }
 
-    #[test]
-    fn placement_spreads_games_before_deepening_a_matchup() {
-        let model = fit_rating_model(3, &[]);
-        let pair_counts = counts([[0, 5, 0], [5, 0, 0], [0, 0, 0]]);
-
+        let spreading = counts([[0, 5, 0], [5, 0, 0], [0, 0, 0]]);
         assert_eq!(
-            select_pair_for_model(&model, &pair_counts, &[None; 3], &[None; 3], 0, 2, 10),
+            select_pair_for_model(
+                &fit_rating_model(3, &[]),
+                &spreading,
+                &[None; 3],
+                &[None; 3],
+                0,
+                2,
+                10,
+            ),
             Some((0, 2))
         );
-    }
 
-    #[test]
-    fn provisional_status_uses_opponent_diversity_and_uncertainty() {
         let pair_counts = vec![vec![0, 20, 20], vec![20, 0, 0], vec![20, 0, 0]];
-        assert!(!is_provisional(
-            &rating(0, 1600.0, 70.0),
-            &pair_counts,
-            2,
-            20,
-            80.0
-        ));
-        assert!(is_provisional(
-            &rating(1, 1500.0, 70.0),
-            &pair_counts,
-            2,
-            20,
-            80.0
-        ));
-        assert!(is_provisional(
-            &rating(0, 1600.0, 100.0),
-            &pair_counts,
-            2,
-            20,
-            80.0
-        ));
+        for (name, candidate, expected) in [
+            ("established", rating(0, 1600.0, 70.0), false),
+            ("too few opponents", rating(1, 1500.0, 70.0), true),
+            ("high uncertainty", rating(0, 1600.0, 100.0), true),
+        ] {
+            assert_eq!(
+                is_provisional(&candidate, &pair_counts, 2, 20, 80.0),
+                expected,
+                "{name}"
+            );
+        }
     }
 }

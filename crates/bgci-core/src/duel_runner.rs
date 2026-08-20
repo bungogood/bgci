@@ -228,29 +228,3 @@ fn process_completed_game(
         b_decision_time: result.b_decision_time,
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use super::validate_execution;
-
-    #[test]
-    fn validates_execution_limits_without_starting_engines() {
-        assert_eq!(validate_execution(1, 1, 1), Ok(2));
-        assert_eq!(
-            validate_execution(0, 1, 1),
-            Err("pairs must be greater than zero".to_string())
-        );
-        assert_eq!(
-            validate_execution(1, 0, 1),
-            Err("parallel must be greater than zero".to_string())
-        );
-        assert_eq!(
-            validate_execution(1, 1, 0),
-            Err("max plies must be greater than zero".to_string())
-        );
-        assert_eq!(
-            validate_execution(usize::MAX, 1, 1),
-            Err("pair count is too large".to_string())
-        );
-    }
-}

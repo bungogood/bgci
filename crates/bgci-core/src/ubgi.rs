@@ -19,7 +19,12 @@ pub(crate) fn parse_response(line: &str) -> Response<'_> {
     if line == "readyok" {
         Response::ReadyOk
     } else if let Some(mv) = line.strip_prefix("bestmove ") {
-        Response::BestMove(mv.trim())
+        let mv = mv.trim();
+        if mv.is_empty() {
+            Response::MalformedBest(line)
+        } else {
+            Response::BestMove(mv)
+        }
     } else if line.starts_with("error ") {
         Response::Error(line)
     } else if line.starts_with("best") {
@@ -51,6 +56,7 @@ mod tests {
             ("bestmove 13/8 6/5", Response::BestMove("13/8 6/5")),
             ("error unsupported", Response::Error("error unsupported")),
             ("bestmove", Response::MalformedBest("bestmove")),
+            ("bestmove ", Response::MalformedBest("bestmove ")),
             ("bestscore 1", Response::MalformedBest("bestscore 1")),
             ("readyok", Response::ReadyOk),
             ("info depth 1", Response::Irrelevant),

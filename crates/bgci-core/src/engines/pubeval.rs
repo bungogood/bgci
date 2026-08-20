@@ -124,9 +124,13 @@ fn parse_weights(input: &str, label: &str) -> Result<[f32; 122], String> {
         if count >= out.len() {
             return Err(format!("{label} has too many weights"));
         }
-        out[count] = token
+        let weight = token
             .parse::<f32>()
             .map_err(|_| format!("{label} has invalid float '{token}'"))?;
+        if !weight.is_finite() {
+            return Err(format!("{label} has invalid float '{token}'"));
+        }
+        out[count] = weight;
         count += 1;
     }
     if count != 122 {
@@ -268,26 +272,24 @@ mod tests {
     use super::parse_weights;
 
     #[test]
-    fn parse_weights_rejects_invalid_float() {
-        let mut values = vec!["0"; 122];
-        values[42] = "invalid";
+    fn parse_weights_contract() {
+        assert_eq!(
+            parse_weights(&vec!["1.5"; 122].join(" "), "test").unwrap(),
+            [1.5; 122]
+        );
 
-        let err = parse_weights(&values.join(" "), "test").unwrap_err();
-
-        assert_eq!(err, "test has invalid float 'invalid'");
-    }
-
-    #[test]
-    fn parse_weights_rejects_missing_weights() {
-        let err = parse_weights(&vec!["0"; 121].join(" "), "test").unwrap_err();
-
-        assert_eq!(err, "test expected 122 weights, got 121");
-    }
-
-    #[test]
-    fn parse_weights_rejects_extra_weights() {
-        let err = parse_weights(&vec!["0"; 123].join(" "), "test").unwrap_err();
-
-        assert_eq!(err, "test has too many weights");
+        let cases = [
+            (
+                vec!["0"; 121].join(" "),
+                "test expected 122 weights, got 121",
+            ),
+            (vec!["0"; 123].join(" "), "test has too many weights"),
+            ("invalid".to_string(), "test has invalid float 'invalid'"),
+            ("NaN".to_string(), "test has invalid float 'NaN'"),
+            ("inf".to_string(), "test has invalid float 'inf'"),
+        ];
+        for (input, expected) in cases {
+            assert_eq!(parse_weights(&input, "test").unwrap_err(), expected);
+        }
     }
 }
