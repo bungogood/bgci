@@ -72,34 +72,30 @@ pub async fn run(args: LeagueArgs) -> Result<(), String> {
     )?;
     let matchup_count = started.matchups.len();
 
-    let mut matchup_number = 0;
-    for a in 0..engines.len() {
-        for b in (a + 1)..engines.len() {
-            matchup_number += 1;
-            println!(
-                "matchup {matchup_number}/{matchup_count}: {} vs {}",
-                engines[a].name, engines[b].name
-            );
-            let matchup = started.matchups[matchup_number - 1];
-            let cfg = ResolvedMatchup {
-                pairs: args.pairs_per_matchup,
-                parallel: args.parallel.max(1),
-                seed: matchup.seed(),
-                max_plies,
-                variant: args.variant.clone(),
-                log_level: "off".to_string(),
-                engine_a: engines[a].clone(),
-                engine_b: engines[b].clone(),
-            };
-            let result = match run_matchup(&cfg, variant).await {
-                Ok(result) => result,
-                Err(error) => {
-                    return Err(mark_failed(&store, started.id, error));
-                }
-            };
-            if let Err(error) = store.record_games(matchup, &result.games) {
+    for (matchup_index, scheduled) in started.matchups.iter().enumerate() {
+        let matchup_number = matchup_index + 1;
+        println!(
+            "matchup {matchup_number}/{matchup_count}: {} vs {}",
+            engines[scheduled.engine_a].name, engines[scheduled.engine_b].name
+        );
+        let cfg = ResolvedMatchup {
+            pairs: args.pairs_per_matchup,
+            parallel: args.parallel.max(1),
+            seed: scheduled.handle.seed(),
+            max_plies,
+            variant: args.variant.clone(),
+            log_level: "off".to_string(),
+            engine_a: engines[scheduled.engine_a].clone(),
+            engine_b: engines[scheduled.engine_b].clone(),
+        };
+        let result = match run_matchup(&cfg, variant).await {
+            Ok(result) => result,
+            Err(error) => {
                 return Err(mark_failed(&store, started.id, error));
             }
+        };
+        if let Err(error) = store.record_games(scheduled.handle, &result.games) {
+            return Err(mark_failed(&store, started.id, error));
         }
     }
     store.finish_benchmark(started.id)?;

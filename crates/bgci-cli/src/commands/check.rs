@@ -116,5 +116,9 @@ fn run_single(
         }
     }
 
-    Ok(())
+    if report.is_pass() {
+        Ok(())
+    } else {
+        Err("engine check failed".to_string())
+    }
 }

@@ -64,9 +64,16 @@ impl MatchupHandle {
     }
 }
 
+#[derive(Clone, Copy, Debug)]
+pub struct ScheduledMatchup {
+    pub handle: MatchupHandle,
+    pub engine_a: usize,
+    pub engine_b: usize,
+}
+
 pub struct StartedBenchmark {
     pub id: i64,
-    pub matchups: Vec<MatchupHandle>,
+    pub matchups: Vec<ScheduledMatchup>,
 }
 
 pub struct BenchmarkSpec<'a> {
@@ -185,7 +192,11 @@ impl Database {
             .map_err(|e| format!("commit duel transaction: {e}"))?;
         Ok(StartedBenchmark {
             id: benchmark_id,
-            matchups: vec![matchup],
+            matchups: vec![ScheduledMatchup {
+                handle: matchup,
+                engine_a: 0,
+                engine_b: 1,
+            }],
         })
     }
 
@@ -194,6 +205,16 @@ impl Database {
         spec: BenchmarkSpec<'_>,
         engines: &[ResolvedEngine],
     ) -> Result<StartedBenchmark, String> {
+        if engines.len() < 2 {
+            return Err("league requires at least two engines".to_string());
+        }
+        let mut identities = HashSet::new();
+        for engine in engines {
+            if !identities.insert(engine_identity(engine)?) {
+                return Err(format!("duplicate resolved engine: {}", engine.name));
+            }
+        }
+
         let matchup_count = engines.len() * (engines.len() - 1) / 2;
         let requested_pairs = spec
             .pairs
@@ -220,7 +241,7 @@ impl Database {
         for a in 0..engines.len() {
             for b in (a + 1)..engines.len() {
                 let matchup_seed = seed_for_game(spec.seed, matchups.len());
-                matchups.push(add_matchup(
+                let handle = add_matchup(
                     &tx,
                     benchmark_id,
                     engine_ids[a],
@@ -228,7 +249,12 @@ impl Database {
                     spec.pairs,
                     matchup_seed,
                     matchups.len(),
-                )?);
+                )?;
+                matchups.push(ScheduledMatchup {
+                    handle,
+                    engine_a: a,
+                    engine_b: b,
+                });
             }
         }
         tx.commit()
@@ -1314,7 +1340,7 @@ mod tests {
         let mut second = game(1);
         second.points_a = -2.0;
         store
-            .record_games(started.matchups[0], &[game(0), second])
+            .record_games(started.matchups[0].handle, &[game(0), second])
             .unwrap();
         store.finish_benchmark(started.id).unwrap();
 
@@ -1351,12 +1377,12 @@ mod tests {
             .start_duel(spec(1), &config("a"), &config("b"))
             .unwrap();
         store
-            .record_games(started.matchups[0], &[game(0), game(1)])
+            .record_games(started.matchups[0].handle, &[game(0), game(1)])
             .unwrap();
 
         assert!(
             store
-                .record_games(started.matchups[0], &[game(0), game(1)])
+                .record_games(started.matchups[0].handle, &[game(0), game(1)])
                 .is_err()
         );
     }
@@ -1381,14 +1407,55 @@ mod tests {
     }
 
     #[test]
-    fn league_matchups_have_distinct_deterministic_seeds() {
+    fn league_schedule_preserves_order_indices_and_seeds() {
         let mut store = Database::from_connection(Connection::open_in_memory().unwrap()).unwrap();
         let engines = [config("a"), config("b"), config("c")];
         let started = store.start_league(spec(1), &engines).unwrap();
 
         assert_eq!(started.matchups.len(), 3);
-        assert_ne!(started.matchups[0].seed(), started.matchups[1].seed());
-        assert_ne!(started.matchups[1].seed(), started.matchups[2].seed());
+        assert_eq!(
+            started
+                .matchups
+                .iter()
+                .map(|matchup| (matchup.engine_a, matchup.engine_b))
+                .collect::<Vec<_>>(),
+            [(0, 1), (0, 2), (1, 2)]
+        );
+        assert_eq!(started.matchups[0].handle.seed(), seed_for_game(42, 0));
+        assert_eq!(started.matchups[1].handle.seed(), seed_for_game(42, 1));
+        assert_eq!(started.matchups[2].handle.seed(), seed_for_game(42, 2));
+    }
+
+    #[test]
+    fn league_rejects_fewer_than_two_engines_without_mutation() {
+        for engines in [Vec::new(), vec![config("only")]] {
+            let mut store =
+                Database::from_connection(Connection::open_in_memory().unwrap()).unwrap();
+
+            assert!(store.start_league(spec(1), &engines).is_err());
+            assert!(store.list().unwrap().is_empty());
+            let builds: i64 = store
+                .conn
+                .query_row("SELECT COUNT(*) FROM engine_builds", [], |row| row.get(0))
+                .unwrap();
+            assert_eq!(builds, 0);
+        }
+    }
+
+    #[test]
+    fn league_rejects_identical_launches_with_different_names_without_mutation() {
+        let mut store = Database::from_connection(Connection::open_in_memory().unwrap()).unwrap();
+        let first = config("engine");
+        let mut renamed = first.clone();
+        renamed.name = "renamed".to_string();
+
+        assert!(store.start_league(spec(1), &[first, renamed]).is_err());
+        assert!(store.list().unwrap().is_empty());
+        let builds: i64 = store
+            .conn
+            .query_row("SELECT COUNT(*) FROM engine_builds", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(builds, 0);
     }
 
     #[test]
@@ -1416,7 +1483,7 @@ mod tests {
 
         assert!(
             store
-                .record_games(started.matchups[0], &[first, game(1)])
+                .record_games(started.matchups[0].handle, &[first, game(1)])
                 .is_err()
         );
     }
@@ -1433,7 +1500,7 @@ mod tests {
             invalid.points_a = points_a;
             assert!(
                 store
-                    .record_games(started.matchups[0], &[invalid, game(1)])
+                    .record_games(started.matchups[0].handle, &[invalid, game(1)])
                     .is_err()
             );
         }
@@ -1509,7 +1576,7 @@ mod tests {
         a.metadata.family = Some("kestral".to_string());
         let started = store.start_duel(spec(1), &a, &config("b")).unwrap();
         store
-            .record_games(started.matchups[0], &[game(0), game(1)])
+            .record_games(started.matchups[0].handle, &[game(0), game(1)])
             .unwrap();
         let summaries = store.engine_summaries(started.id).unwrap();
 

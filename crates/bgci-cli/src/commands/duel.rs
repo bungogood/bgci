@@ -263,11 +263,16 @@ impl SavedDuel {
             &cfg.engine_a,
             &cfg.engine_b,
         )?;
+        let matchup = started
+            .matchups
+            .first()
+            .ok_or_else(|| "saved duel did not create a matchup".to_string())?
+            .handle;
         Ok(Self {
             store,
             db_path,
             id: started.id,
-            matchup: started.matchups[0],
+            matchup,
         })
     }
 

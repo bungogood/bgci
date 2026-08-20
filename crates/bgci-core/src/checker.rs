@@ -2,6 +2,7 @@ use bkgm::codecs::gnuid;
 use bkgm::dice::Dice;
 use bkgm::{Game, Variant, normalize_move_text};
 
+use crate::common::variant_name;
 use crate::config::ResolvedEngine;
 use crate::engine::EngineProcess;
 
@@ -99,7 +100,7 @@ pub fn run_check(engine_cfg: &ResolvedEngine, variant: Variant) -> Result<CheckR
     engine.send_command("isready")?;
     report.supports_newgame = wait_readyok(&mut engine, &mut report.errors, "newgame");
 
-    engine.send_command("set game.variant backgammon")?;
+    engine.send_command(&format!("set game.variant {}", variant_name(variant)))?;
     engine.send_command("isready")?;
     let _ = wait_readyok(&mut engine, &mut report.errors, "set game.variant");
 
