@@ -34,6 +34,8 @@ enum RankCommand {
     Run(RunArgs),
     /// Add provisional engines to a paused ranking pool.
     Add(AddArgs),
+    /// Refresh display metadata from the current engine registry.
+    Refresh(RefreshArgs),
     /// Recompute and display a named ranking pool.
     Show(PoolArgs),
     /// List named ranking pools.
@@ -107,6 +109,13 @@ struct PoolArgs {
     diagnostics: bool,
 }
 
+#[derive(Debug, Args)]
+struct RefreshArgs {
+    /// Ranking pool name.
+    #[arg(default_value = "main")]
+    name: String,
+}
+
 #[derive(Debug, Clone, Args)]
 struct SessionArgs {
     /// Additional pairs to run in this session; omit to run until Ctrl-C.
@@ -167,6 +176,18 @@ pub async fn run(args: RankArgs) -> Result<(), String> {
                 engines.len(),
                 pool.name
             );
+            show_ranking(&store, &pool, false, verbose)
+        }
+        RankCommand::Refresh(args) => {
+            let pool = store.load_ranking_by_name(&args.name)?;
+            let specs = pool
+                .engines
+                .iter()
+                .map(|engine| engine.name.clone())
+                .collect::<Vec<_>>();
+            let engines = resolve_engines(&specs)?;
+            let pool = store.refresh_ranking_engine_metadata(&args.name, &engines)?;
+            println!("refreshed metadata for ranking '{}'", pool.name);
             show_ranking(&store, &pool, false, verbose)
         }
         RankCommand::Show(args) => {
@@ -312,9 +333,9 @@ fn show_ranking(
     }
     println!();
     println!("ranking '{}' [{}]", pool.name, pool.status);
-    let engine_width = if verbose { 48 } else { 29 };
+    let engine_width = if verbose { 72 } else { 48 };
     println!(
-        " rank  tier  status       family             {:<engine_width$}  rating     rd  move ms   games",
+        " rank  tier  status       {:<engine_width$}  rating     rd  move ms   games",
         "engine"
     );
     for (rank, rating) in ratings.iter().enumerate() {
@@ -335,11 +356,10 @@ fn show_ranking(
             .unwrap_or_else(|| "-".to_string());
         let engine_name = display_engine_name(engine, verbose);
         println!(
-            "{:>5}  {:>4}  {:<11}  {:<18}  {:<engine_width$}  {:>7.1}  {:>5.1}  {:>7}  {:>6}",
+            "{:>5}  {:>4}  {:<11}  {:<engine_width$}  {:>7.1}  {:>5.1}  {:>7}  {:>6}",
             rank + 1,
             tiers[rank],
             status,
-            engine.family.as_deref().unwrap_or("-"),
             engine_name,
             rating.elo,
             rating.rd,
@@ -367,8 +387,8 @@ fn show_ranking(
             for residual in diagnostics.residuals.iter().take(10) {
                 println!(
                     "  {:<23} vs {:<23} {:>5}   {:>7.3}   {:>7.3}  {:+7.3} PPG",
-                    pool.engines[residual.engine_a].name,
-                    pool.engines[residual.engine_b].name,
+                    display_engine_name(&pool.engines[residual.engine_a], false),
+                    display_engine_name(&pool.engines[residual.engine_b], false),
                     residual.pairs,
                     residual.observed_score,
                     residual.expected_score,
@@ -382,12 +402,9 @@ fn show_ranking(
 }
 
 fn display_engine_name(engine: &bgci_core::benchmark::RankingEngine, verbose: bool) -> String {
-    if !verbose || engine.config.options.is_empty() {
-        return engine.name.clone();
-    }
-    let options = engine
-        .config
-        .options
+    let mut configuration = engine.configuration.clone();
+    configuration.extend(engine.config.options.clone());
+    let options = configuration
         .iter()
         .map(|(key, value)| {
             let key = key
@@ -398,11 +415,29 @@ fn display_engine_name(engine: &bgci_core::benchmark::RankingEngine, verbose: bo
         })
         .collect::<Vec<_>>()
         .join(",");
-    let base = engine
+    let alias = engine
         .name
         .split_once(':')
         .map_or(engine.name.as_str(), |v| v.0);
-    format!("{base}:{options}")
+    let (alias_base, alias_version) = alias
+        .split_once('@')
+        .map_or((alias, None), |(base, version)| (base, Some(version)));
+    let base = engine.family.as_deref().unwrap_or(alias_base);
+    let version = engine.version.as_deref().or(alias_version);
+    let mut label = base.to_string();
+    if let Some(version) = version.map(str::trim).filter(|version| !version.is_empty()) {
+        label.push('@');
+        label.push_str(version.trim_start_matches('@'));
+    }
+    if !options.is_empty() {
+        label.push(':');
+        label.push_str(&options);
+    }
+    if verbose && label != engine.name {
+        format!("{label} [alias={}]", engine.name)
+    } else {
+        label
+    }
 }
 
 fn resolve_engines(specs: &[String]) -> Result<Vec<EngineConfig>, String> {

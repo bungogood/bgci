@@ -40,6 +40,10 @@ pub struct EngineConfig {
     pub name: String,
     #[serde(default, skip_serializing)]
     pub family: Option<String>,
+    #[serde(default, skip_serializing)]
+    pub version: Option<String>,
+    #[serde(default, skip_serializing)]
+    pub configuration: BTreeMap<String, String>,
     #[serde(default)]
     pub engine: Option<String>,
     #[serde(deserialize_with = "deserialize_command")]
@@ -55,6 +59,8 @@ pub struct EngineConfig {
 pub struct EngineAliasDetail {
     pub name: String,
     pub family: Option<String>,
+    pub version: Option<String>,
+    pub configuration: BTreeMap<String, String>,
     pub url: Option<String>,
     pub source: String,
     pub command: Vec<String>,
@@ -67,6 +73,8 @@ impl EngineConfig {
         Self {
             name: "random-a".to_string(),
             family: None,
+            version: None,
+            configuration: BTreeMap::new(),
             engine: Some("random".to_string()),
             command: Vec::new(),
             env: BTreeMap::new(),
@@ -78,6 +86,8 @@ impl EngineConfig {
         Self {
             name: "random-b".to_string(),
             family: None,
+            version: None,
+            configuration: BTreeMap::new(),
             engine: Some("random".to_string()),
             command: Vec::new(),
             env: BTreeMap::new(),
@@ -97,6 +107,10 @@ enum CommandField {
 struct EngineTemplate {
     #[serde(default)]
     family: Option<String>,
+    #[serde(default)]
+    version: Option<String>,
+    #[serde(default)]
+    configuration: BTreeMap<String, String>,
     #[serde(default)]
     url: Option<String>,
     #[serde(deserialize_with = "deserialize_command")]
@@ -145,6 +159,8 @@ pub fn resolve_engine_reference(alias: &str) -> Result<EngineConfig, String> {
     let mut engine = EngineConfig {
         name: alias.to_string(),
         family: None,
+        version: None,
+        configuration: BTreeMap::new(),
         engine: Some(alias.to_string()),
         command: Vec::new(),
         env: BTreeMap::new(),
@@ -308,6 +324,12 @@ fn resolve_engine_alias(
         if engine.family.is_none() {
             engine.family = template.family.clone();
         }
+        if engine.version.is_none() {
+            engine.version = template.version.clone();
+        }
+        if engine.configuration.is_empty() {
+            engine.configuration = template.configuration.clone();
+        }
         let mut merged_env = template.env.clone();
         for (key, value) in &engine.env {
             merged_env.insert(key.clone(), value.clone());
@@ -417,6 +439,8 @@ pub fn list_engine_alias_details() -> Result<Vec<EngineAliasDetail>, String> {
             EngineAliasDetail {
                 name: name.clone(),
                 family: None,
+                version: None,
+                configuration: BTreeMap::new(),
                 url: None,
                 source: "builtin".to_string(),
                 command: builtin_display_command(&name),
@@ -441,6 +465,8 @@ pub fn list_engine_alias_details() -> Result<Vec<EngineAliasDetail>, String> {
             EngineAliasDetail {
                 name,
                 family: template.family,
+                version: template.version,
+                configuration: template.configuration,
                 url: template.url,
                 source: "user".to_string(),
                 command,
@@ -501,6 +527,8 @@ mod tests {
             r#"
             [engines.kestral-light]
             family = "kestral"
+            version = "v2"
+            configuration = { model = "light" }
             url = "https://example.com/kestral"
             command = ["/opt/kestral", "--model", "light.bin"]
 
@@ -512,6 +540,8 @@ mod tests {
         let engine = &config.engines["kestral-light"];
 
         assert_eq!(engine.family.as_deref(), Some("kestral"));
+        assert_eq!(engine.version.as_deref(), Some("v2"));
+        assert_eq!(engine.configuration["model"], "light");
         assert_eq!(engine.url.as_deref(), Some("https://example.com/kestral"));
         assert_eq!(engine.command[0], "/opt/kestral");
         assert_eq!(engine.options["engine.ply"], "1");

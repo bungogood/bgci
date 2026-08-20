@@ -156,6 +156,8 @@ keeping independent commands and UBGI options:
 ```toml
 [engines.kestral-dmp-best]
 family = "kestral"
+version = "2026.08"
+configuration = { model = "dmp-best" }
 command = ["/path/to/kestral", "--model", "/models/dmp-best.bin"]
 
 [engines.kestral-dmp-best.options]
@@ -171,6 +173,15 @@ command = ["/path/to/kestral", "--model", "/models/dmp-light.bin"]
 
 Family is display and organization metadata. Every alias remains a separate
 benchmark participant, and changing its family does not change launch identity.
+`version` and `configuration` describe behavior selected outside UBGI, such as
+a command-line model checkpoint. Values under `.options` are sent to the engine
+through UBGI. Ranking labels combine both as
+`engine@version:key=value,...`. Refresh metadata snapshots for a paused pool
+without changing games or launch identity with:
+
+```bash
+bgci rank refresh main
+```
 
 Inspect configured and built-in engines with:
 

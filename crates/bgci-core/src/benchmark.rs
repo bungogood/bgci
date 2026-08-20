@@ -1,4 +1,4 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -10,7 +10,7 @@ use crate::duel_game::seed_for_game;
 use crate::duel_runner::GameRecord;
 use crate::ranking::RankingEdge;
 
-const SCHEMA_VERSION: i64 = 2;
+const SCHEMA_VERSION: i64 = 3;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum BenchmarkKind {
@@ -92,8 +92,11 @@ pub struct RankingSpec<'a> {
 #[derive(Clone, Debug)]
 pub struct RankingEngine {
     build_id: i64,
+    identity: String,
     pub name: String,
     pub family: Option<String>,
+    pub version: Option<String>,
+    pub configuration: BTreeMap<String, String>,
     pub config: EngineConfig,
 }
 
@@ -324,7 +327,8 @@ impl BenchmarkStore {
         let mut stmt = self
             .conn
             .prepare(
-                "SELECT eb.id, eb.name, be.family, eb.command_json, eb.env_json, eb.options_json
+                "SELECT eb.id, eb.identity, eb.name, be.family, be.version, be.configuration_json,
+                        eb.command_json, eb.env_json, eb.options_json
                  FROM benchmark_engines be
                  JOIN engine_builds eb ON eb.id = be.engine_build_id
                  WHERE be.benchmark_id = ?
@@ -336,22 +340,30 @@ impl BenchmarkStore {
                 Ok((
                     row.get::<_, i64>(0)?,
                     row.get::<_, String>(1)?,
-                    row.get::<_, Option<String>>(2)?,
-                    row.get::<_, String>(3)?,
-                    row.get::<_, String>(4)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, Option<String>>(3)?,
+                    row.get::<_, Option<String>>(4)?,
                     row.get::<_, String>(5)?,
+                    row.get::<_, String>(6)?,
+                    row.get::<_, String>(7)?,
+                    row.get::<_, String>(8)?,
                 ))
             })
             .map_err(|e| format!("query ranking engines: {e}"))?;
         let mut engines = Vec::new();
         for row in rows {
-            let (build_id, name, family, command, env, options) =
+            let (build_id, identity, name, family, version, configuration, command, env, options) =
                 row.map_err(|e| format!("read ranking engine: {e}"))?;
+            let configuration: BTreeMap<String, String> = serde_json::from_str(&configuration)
+                .map_err(|e| format!("parse engine display configuration: {e}"))?;
             engines.push(RankingEngine {
                 build_id,
+                identity,
                 config: EngineConfig {
                     name: name.clone(),
                     family: family.clone(),
+                    version: version.clone(),
+                    configuration: configuration.clone(),
                     engine: None,
                     command: serde_json::from_str(&command)
                         .map_err(|e| format!("parse engine command: {e}"))?,
@@ -362,6 +374,8 @@ impl BenchmarkStore {
                 },
                 name,
                 family,
+                version,
+                configuration,
             });
         }
         let next_batch: i64 = self
@@ -418,8 +432,8 @@ impl BenchmarkStore {
         let mut identities = pool
             .engines
             .iter()
-            .map(|engine| engine_identity(&engine.config))
-            .collect::<Result<HashSet<_>, _>>()?;
+            .map(|engine| engine.identity.clone())
+            .collect::<HashSet<_>>();
         for engine in engines {
             if !identities.insert(engine_identity(engine)?) {
                 return Err(format!(
@@ -450,6 +464,51 @@ impl BenchmarkStore {
         }
         tx.commit()
             .map_err(|e| format!("commit ranking engines: {e}"))?;
+        self.load_ranking(pool.id)
+    }
+
+    pub fn refresh_ranking_engine_metadata(
+        &mut self,
+        name: &str,
+        engines: &[EngineConfig],
+    ) -> Result<RankingPool, String> {
+        let pool = self.load_ranking_by_name(name)?;
+        if pool.status != "paused" {
+            return Err(format!(
+                "ranking '{}' must be paused before refreshing metadata",
+                pool.name
+            ));
+        }
+        let configs = engines
+            .iter()
+            .map(|engine| Ok((engine_identity(engine)?, engine)))
+            .collect::<Result<HashMap<_, _>, String>>()?;
+        let tx = self
+            .conn
+            .transaction()
+            .map_err(|e| format!("begin refresh ranking metadata transaction: {e}"))?;
+        for participant in &pool.engines {
+            let config = configs.get(&participant.identity).ok_or_else(|| {
+                format!("no current metadata found for engine {}", participant.name)
+            })?;
+            let configuration = serde_json::to_string(&config.configuration)
+                .map_err(|e| format!("serialize engine display configuration: {e}"))?;
+            tx.execute(
+                "UPDATE benchmark_engines
+                 SET family = ?, version = ?, configuration_json = ?
+                 WHERE benchmark_id = ? AND engine_build_id = ? AND role = 'member'",
+                params![
+                    config.family.as_deref(),
+                    config.version.as_deref(),
+                    configuration,
+                    pool.id,
+                    participant.build_id,
+                ],
+            )
+            .map_err(|e| format!("refresh metadata for {}: {e}", participant.name))?;
+        }
+        tx.commit()
+            .map_err(|e| format!("commit ranking metadata refresh: {e}"))?;
         self.load_ranking(pool.id)
     }
 
@@ -936,6 +995,8 @@ fn add_engine(
         .map_err(|e| format!("serialize engine environment: {e}"))?;
     let options = serde_json::to_string(&config.options)
         .map_err(|e| format!("serialize engine options: {e}"))?;
+    let configuration = serde_json::to_string(&config.configuration)
+        .map_err(|e| format!("serialize engine display configuration: {e}"))?;
     tx.execute(
         "INSERT INTO engine_builds(identity, name, command_json, env_json, options_json)
          VALUES (?, ?, ?, ?, ?)
@@ -951,8 +1012,9 @@ fn add_engine(
         )
         .map_err(|e| format!("load engine build: {e}"))?;
     tx.execute(
-        "INSERT INTO benchmark_engines(benchmark_id, engine_build_id, role, family)
-         VALUES (?, ?, ?, ?)",
+        "INSERT INTO benchmark_engines(
+             benchmark_id, engine_build_id, role, family, version, configuration_json
+         ) VALUES (?, ?, ?, ?, ?, ?)",
         params![
             benchmark_id,
             build_id,
@@ -961,7 +1023,13 @@ fn add_engine(
                 .family
                 .as_deref()
                 .map(str::trim)
-                .filter(|v| !v.is_empty())
+                .filter(|v| !v.is_empty()),
+            config
+                .version
+                .as_deref()
+                .map(str::trim)
+                .filter(|v| !v.is_empty()),
+            configuration
         ],
     )
     .map_err(|e| format!("add benchmark engine: {e}"))?;
@@ -1164,6 +1232,8 @@ fn migrate(conn: &Connection) -> Result<(), String> {
                engine_build_id INTEGER NOT NULL REFERENCES engine_builds(id),
                role TEXT NOT NULL,
                family TEXT,
+               version TEXT,
+               configuration_json TEXT NOT NULL DEFAULT '{}',
                PRIMARY KEY(benchmark_id, role, engine_build_id)
              );
              CREATE TABLE matchups (
@@ -1228,10 +1298,10 @@ fn migrate(conn: &Connection) -> Result<(), String> {
                 last_played_batch INTEGER,
                 PRIMARY KEY(benchmark_id, engine_id)
               );
-              PRAGMA user_version = 2;
+               PRAGMA user_version = 3;
               COMMIT;",
         )
-        .map_err(|e| format!("apply benchmark schema v2: {e}"))?;
+        .map_err(|e| format!("apply benchmark schema v3: {e}"))?;
     } else if version == 1 {
         let tx = conn
             .unchecked_transaction()
@@ -1257,7 +1327,9 @@ fn migrate(conn: &Connection) -> Result<(), String> {
                decision_seconds REAL NOT NULL CHECK(decision_seconds >= 0),
                last_played_batch INTEGER,
                PRIMARY KEY(benchmark_id, engine_id)
-             );",
+             );
+             ALTER TABLE benchmark_engines ADD COLUMN version TEXT;
+             ALTER TABLE benchmark_engines ADD COLUMN configuration_json TEXT NOT NULL DEFAULT '{}';",
         )
         .map_err(|e| format!("create benchmark schema v2 projections: {e}"))?;
         rebuild_ranking_projections(&tx)?;
@@ -1265,6 +1337,19 @@ fn migrate(conn: &Connection) -> Result<(), String> {
             .map_err(|e| format!("set benchmark schema version: {e}"))?;
         tx.commit()
             .map_err(|e| format!("commit benchmark schema v2 migration: {e}"))?;
+    } else if version == 2 {
+        let tx = conn
+            .unchecked_transaction()
+            .map_err(|e| format!("begin benchmark schema v3 migration: {e}"))?;
+        tx.execute_batch(
+            "ALTER TABLE benchmark_engines ADD COLUMN version TEXT;
+             ALTER TABLE benchmark_engines ADD COLUMN configuration_json TEXT NOT NULL DEFAULT '{}';",
+        )
+        .map_err(|e| format!("add benchmark engine metadata: {e}"))?;
+        tx.pragma_update(None, "user_version", SCHEMA_VERSION)
+            .map_err(|e| format!("set benchmark schema version: {e}"))?;
+        tx.commit()
+            .map_err(|e| format!("commit benchmark schema v3 migration: {e}"))?;
     }
     Ok(())
 }
@@ -1354,6 +1439,8 @@ mod tests {
         EngineConfig {
             name: name.to_string(),
             family: None,
+            version: None,
+            configuration: BTreeMap::new(),
             engine: Some(name.to_string()),
             command: vec![name.to_string()],
             env: Default::default(),
@@ -1574,6 +1661,32 @@ mod tests {
     }
 
     #[test]
+    fn ranking_metadata_can_be_refreshed_without_changing_identity() {
+        let mut store =
+            BenchmarkStore::from_connection(Connection::open_in_memory().unwrap()).unwrap();
+        let pool = ranking_pool(&mut store);
+        store.pause_ranking(pool.id).unwrap();
+        let mut a = config("a");
+        a.family = Some("family-a".to_string());
+        a.version = Some("v2".to_string());
+        a.configuration
+            .insert("model".to_string(), "large".to_string());
+
+        let refreshed = store
+            .refresh_ranking_engine_metadata(&pool.name, &[a, config("b")])
+            .unwrap();
+        let a = refreshed
+            .engines
+            .iter()
+            .find(|engine| engine.name == "a")
+            .unwrap();
+
+        assert_eq!(a.family.as_deref(), Some("family-a"));
+        assert_eq!(a.version.as_deref(), Some("v2"));
+        assert_eq!(a.configuration["model"], "large");
+    }
+
+    #[test]
     fn empty_ranking_batch_can_be_retried() {
         let mut store =
             BenchmarkStore::from_connection(Connection::open_in_memory().unwrap()).unwrap();
@@ -1698,8 +1811,10 @@ mod tests {
             .conn
             .execute_batch(
                 "DROP TABLE ranking_edge_stats;
-                 DROP TABLE ranking_engine_stats;
-                 PRAGMA user_version = 1;",
+                  DROP TABLE ranking_engine_stats;
+                  ALTER TABLE benchmark_engines DROP COLUMN configuration_json;
+                  ALTER TABLE benchmark_engines DROP COLUMN version;
+                  PRAGMA user_version = 1;",
             )
             .unwrap();
 

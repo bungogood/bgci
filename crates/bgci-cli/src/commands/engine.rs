@@ -31,6 +31,15 @@ pub fn run(args: EngineArgs) -> Result<(), String> {
                 if let Some(family) = &detail.family {
                     println!("  family: {family}");
                 }
+                if let Some(version) = &detail.version {
+                    println!("  version: {version}");
+                }
+                if !detail.configuration.is_empty() {
+                    println!("  configuration:");
+                    for (key, value) in &detail.configuration {
+                        println!("    {key}={value}");
+                    }
+                }
                 if let Some(url) = &detail.url {
                     println!("  url: {url}");
                 }
