@@ -118,11 +118,8 @@ pub(crate) fn spawn_local_workers(spec: LocalWorkerSpec, tx: mpsc::UnboundedSend
                         a_is_x,
                     ) {
                         Ok(result) => {
-                            let _ = tx.send(WorkerMessage::Game(CompletedGame {
-                                game_idx,
-                                a_is_x,
-                                result,
-                            }));
+                            let _ =
+                                tx.send(WorkerMessage::Game(CompletedGame { game_idx, result }));
                         }
                         Err(err) => {
                             let _ = tx.send(WorkerMessage::Error(format!(

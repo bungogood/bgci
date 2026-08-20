@@ -54,8 +54,6 @@ pub struct EngineSummary {
 #[derive(Clone, Copy, Debug)]
 pub struct MatchupHandle {
     id: i64,
-    engine_a_id: i64,
-    engine_b_id: i64,
     pairs: usize,
     seed: u64,
 }
@@ -665,11 +663,11 @@ impl Database {
                    SELECT MIN(m.engine_a_id, m.engine_b_id) AS engine_lo_id,
                           MAX(m.engine_a_id, m.engine_b_id) AS engine_hi_id,
                           m.id AS matchup_id, g.pair_index,
-                          COUNT(g.winner_id) AS decisive_games,
-                          SUM(CASE WHEN g.winner_id IS NOT NULL THEN
-                            0.5 + CASE WHEN m.engine_a_id < m.engine_b_id
-                              THEN g.points_a ELSE g.points_b END / 6.0
-                            ELSE 0.0 END) AS score_sum_lo
+                           SUM(g.points_a != 0) AS decisive_games,
+                           SUM(CASE WHEN g.points_a != 0 THEN
+                             0.5 + CASE WHEN m.engine_a_id < m.engine_b_id
+                               THEN g.points_a ELSE -g.points_a END / 6.0
+                             ELSE 0.0 END) AS score_sum_lo
                    FROM matchups m
                    JOIN games g ON g.matchup_id = m.id
                    WHERE m.benchmark_id = ?
@@ -784,19 +782,7 @@ impl Database {
             .conn
             .transaction()
             .map_err(|e| format!("begin result transaction: {e}"))?;
-        for (game_index, game) in games.iter().enumerate() {
-            let (engine_x_id, engine_o_id) = if game.a_is_x {
-                (matchup.engine_a_id, matchup.engine_b_id)
-            } else {
-                (matchup.engine_b_id, matchup.engine_a_id)
-            };
-            let winner_id = game.winner_a.map(|a_won| {
-                if a_won {
-                    matchup.engine_a_id
-                } else {
-                    matchup.engine_b_id
-                }
-            });
+        for game in games {
             let (decisions_a, decisions_b, decision_seconds_a, decision_seconds_b) = (
                 game.a_decisions,
                 game.b_decisions,
@@ -805,24 +791,14 @@ impl Database {
             );
             tx.execute(
                 "INSERT INTO games(
-                        matchup_id, pair_index, leg, game_index,
-                        engine_x_id, engine_o_id, winner_id,
-                        outcome, points_x, points_o, points_a, points_b, plies,
+                        matchup_id, pair_index, leg, points_a, plies,
                         decisions_a, decisions_b, decision_seconds_a, decision_seconds_b
-                     ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                     ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 params![
                     matchup.id,
-                    (game_index / 2) as i64,
-                    (game_index % 2) as i64,
-                    game.game_idx as i64,
-                    engine_x_id,
-                    engine_o_id,
-                    winner_id,
-                    game.outcome.as_ref().map(|outcome| outcome.as_str()),
-                    game.points_x,
-                    game.points_o,
+                    (game.game_idx / 2) as i64,
+                    (game.game_idx % 2) as i64,
                     game.points_a,
-                    game.points_b,
                     game.plies as i64,
                     decisions_a as i64,
                     decisions_b as i64,
@@ -968,19 +944,21 @@ impl Database {
             .conn
             .prepare(
                 "SELECT be.family, be.name, be.role, COUNT(g.id),
-                        COALESCE(SUM(CASE WHEN g.winner_id = eb.id THEN 1 ELSE 0 END), 0),
-                        COALESCE(SUM(CASE
-                            WHEN g.engine_x_id = eb.id THEN g.points_x
-                            WHEN g.engine_o_id = eb.id THEN g.points_o
+                         COALESCE(SUM(CASE
+                           WHEN m.engine_a_id = eb.id AND g.points_a > 0 THEN 1
+                           WHEN m.engine_b_id = eb.id AND g.points_a < 0 THEN 1
+                           ELSE 0 END), 0),
+                         COALESCE(SUM(CASE
+                            WHEN m.engine_a_id = eb.id THEN g.points_a
+                            WHEN m.engine_b_id = eb.id THEN -g.points_a
                             ELSE 0 END), 0.0) AS points
                  FROM benchmark_engines be
                  JOIN engine_builds eb ON eb.id = be.engine_build_id
                  LEFT JOIN matchups m
                    ON m.benchmark_id = be.benchmark_id
                   AND (m.engine_a_id = eb.id OR m.engine_b_id = eb.id)
-                  LEFT JOIN games g
-                    ON g.matchup_id = m.id
-                  AND (g.engine_x_id = eb.id OR g.engine_o_id = eb.id)
+                   LEFT JOIN games g
+                     ON g.matchup_id = m.id
                  WHERE be.benchmark_id = ?
                  GROUP BY eb.id, be.family, be.role
                   ORDER BY points * 1.0 / MAX(COUNT(g.id), 1) DESC, be.name",
@@ -1117,18 +1095,6 @@ fn replace_ranking_build(
         return Err("refreshed options duplicate another engine in the ranking".to_string());
     }
 
-    for column in ["engine_x_id", "engine_o_id", "winner_id"] {
-        tx.execute(
-            &format!(
-                "UPDATE games SET {column} = ?
-                 WHERE {column} = ? AND matchup_id IN (
-                   SELECT id FROM matchups WHERE benchmark_id = ?
-                 )"
-            ),
-            params![new_build_id, old_build_id, benchmark_id],
-        )
-        .map_err(|e| format!("replace ranking game build: {e}"))?;
-    }
     for column in ["engine_a_id", "engine_b_id"] {
         tx.execute(
             &format!(
@@ -1178,8 +1144,6 @@ fn add_matchup(
     .map_err(|e| format!("create matchup: {e}"))?;
     Ok(MatchupHandle {
         id: tx.last_insert_rowid(),
-        engine_a_id,
-        engine_b_id,
         pairs,
         seed,
     })
@@ -1199,19 +1163,13 @@ fn validate_games(matchup: MatchupHandle, games: &[GameRecord]) -> Result<(), St
         ));
     }
     for (index, game) in games.iter().enumerate() {
-        if game.game_idx != index || game.a_is_x != (index % 2 == 0) {
+        if game.game_idx != index {
             return Err(format!("invalid mirrored sequence at game {}", index + 1));
         }
-        if (game.points_x + game.points_o).abs() > f64::EPSILON
-            || (game.points_a + game.points_b).abs() > f64::EPSILON
+        if !game.points_a.is_finite()
+            || ![-3.0, -2.0, -1.0, 0.0, 1.0, 2.0, 3.0].contains(&game.points_a)
         {
-            return Err(format!("game {} has inconsistent points", index + 1));
-        }
-        match (game.winner_a, game.outcome.as_ref()) {
-            (Some(true), Some(_)) if game.points_a > 0.0 => {}
-            (Some(false), Some(_)) if game.points_b > 0.0 => {}
-            (None, None) if game.points_a == 0.0 => {}
-            _ => return Err(format!("game {} has inconsistent outcome", index + 1)),
+            return Err(format!("game {} has invalid points", index + 1));
         }
     }
     Ok(())
@@ -1273,29 +1231,19 @@ fn initialize_schema(conn: &Connection) -> Result<(), String> {
                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
                UNIQUE(benchmark_id, batch_index)
              );
-              CREATE TABLE games (
-                id INTEGER PRIMARY KEY,
-                matchup_id INTEGER NOT NULL REFERENCES matchups(id),
-                pair_index INTEGER NOT NULL CHECK(pair_index >= 0),
-                leg INTEGER NOT NULL CHECK(leg IN (0, 1)),
-                game_index INTEGER NOT NULL,
-               engine_x_id INTEGER NOT NULL REFERENCES engine_builds(id),
-               engine_o_id INTEGER NOT NULL REFERENCES engine_builds(id),
-               winner_id INTEGER REFERENCES engine_builds(id),
-               outcome TEXT CHECK(outcome IN ('normal', 'gammon', 'backgammon', 'unknown')),
-               points_x REAL NOT NULL,
-               points_o REAL NOT NULL,
-               points_a REAL NOT NULL,
-               points_b REAL NOT NULL,
-               plies INTEGER NOT NULL,
-               decisions_a INTEGER NOT NULL CHECK(decisions_a >= 0),
-               decisions_b INTEGER NOT NULL CHECK(decisions_b >= 0),
-               decision_seconds_a REAL NOT NULL CHECK(decision_seconds_a >= 0),
-                decision_seconds_b REAL NOT NULL CHECK(decision_seconds_b >= 0),
-                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-                UNIQUE(matchup_id, pair_index, leg),
-                UNIQUE(matchup_id, game_index)
-              );
+               CREATE TABLE games (
+                 id INTEGER PRIMARY KEY,
+                 matchup_id INTEGER NOT NULL REFERENCES matchups(id),
+                 pair_index INTEGER NOT NULL CHECK(pair_index >= 0),
+                 leg INTEGER NOT NULL CHECK(leg IN (0, 1)),
+                points_a REAL NOT NULL CHECK(points_a IN (-3, -2, -1, 0, 1, 2, 3)),
+                plies INTEGER NOT NULL,
+                decisions_a INTEGER NOT NULL CHECK(decisions_a >= 0),
+                decisions_b INTEGER NOT NULL CHECK(decisions_b >= 0),
+                decision_seconds_a REAL NOT NULL CHECK(decision_seconds_a >= 0),
+                 decision_seconds_b REAL NOT NULL CHECK(decision_seconds_b >= 0),
+                 UNIQUE(matchup_id, pair_index, leg)
+               );
               PRAGMA user_version = 1;
               COMMIT;",
         )
@@ -1345,16 +1293,10 @@ mod tests {
         }
     }
 
-    fn game(game_idx: usize, a_is_x: bool) -> GameRecord {
+    fn game(game_idx: usize) -> GameRecord {
         GameRecord {
             game_idx,
-            a_is_x,
-            winner_a: Some(true),
-            outcome: Some(crate::duel_runner::GameOutcome::Normal),
-            points_x: if a_is_x { 1.0 } else { -1.0 },
-            points_o: if a_is_x { -1.0 } else { 1.0 },
             points_a: 1.0,
-            points_b: -1.0,
             plies: 10,
             a_decisions: 5,
             b_decisions: 5,
@@ -1369,8 +1311,10 @@ mod tests {
         let started = store
             .start_duel(spec(1), &config("a"), &config("b"))
             .unwrap();
+        let mut second = game(1);
+        second.points_a = -2.0;
         store
-            .record_games(started.matchups[0], &[game(0, true), game(1, false)])
+            .record_games(started.matchups[0], &[game(0), second])
             .unwrap();
         store.finish_benchmark(started.id).unwrap();
 
@@ -1380,7 +1324,7 @@ mod tests {
         assert_eq!(summary.status, "completed");
         let legs = store
             .conn
-            .prepare("SELECT pair_index, leg FROM games ORDER BY game_index")
+            .prepare("SELECT pair_index, leg FROM games ORDER BY pair_index, leg")
             .unwrap()
             .query_map([], |row| Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?)))
             .unwrap()
@@ -1388,9 +1332,16 @@ mod tests {
             .unwrap();
         assert_eq!(legs, [(0, 0), (0, 1)]);
         let summaries = store.engine_summaries(started.id).unwrap();
-        assert_eq!(summaries[0].name, "a");
-        assert_eq!(summaries[0].wins, 2);
-        assert_eq!(summaries[0].points, 2.0);
+        let a = summaries
+            .iter()
+            .find(|summary| summary.name == "a")
+            .unwrap();
+        let b = summaries
+            .iter()
+            .find(|summary| summary.name == "b")
+            .unwrap();
+        assert_eq!((a.wins, a.points), (1, -1.0));
+        assert_eq!((b.wins, b.points), (1, 1.0));
     }
 
     #[test]
@@ -1400,12 +1351,12 @@ mod tests {
             .start_duel(spec(1), &config("a"), &config("b"))
             .unwrap();
         store
-            .record_games(started.matchups[0], &[game(0, true), game(1, false)])
+            .record_games(started.matchups[0], &[game(0), game(1)])
             .unwrap();
 
         assert!(
             store
-                .record_games(started.matchups[0], &[game(0, true), game(1, false)])
+                .record_games(started.matchups[0], &[game(0), game(1)])
                 .is_err()
         );
     }
@@ -1455,19 +1406,37 @@ mod tests {
     }
 
     #[test]
-    fn rejects_non_mirrored_results() {
+    fn rejects_invalid_game_sequence() {
         let mut store = Database::from_connection(Connection::open_in_memory().unwrap()).unwrap();
         let started = store
             .start_duel(spec(1), &config("a"), &config("b"))
             .unwrap();
-        let mut first = game(0, true);
-        first.a_is_x = false;
+        let mut first = game(0);
+        first.game_idx = 1;
 
         assert!(
             store
-                .record_games(started.matchups[0], &[first, game(1, false)])
+                .record_games(started.matchups[0], &[first, game(1)])
                 .is_err()
         );
+    }
+
+    #[test]
+    fn rejects_noncanonical_points() {
+        let mut store = Database::from_connection(Connection::open_in_memory().unwrap()).unwrap();
+        let started = store
+            .start_duel(spec(1), &config("a"), &config("b"))
+            .unwrap();
+
+        for points_a in [4.0, 0.5, f64::INFINITY, f64::NAN] {
+            let mut invalid = game(0);
+            invalid.points_a = points_a;
+            assert!(
+                store
+                    .record_games(started.matchups[0], &[invalid, game(1)])
+                    .is_err()
+            );
+        }
     }
 
     #[test]
@@ -1540,7 +1509,7 @@ mod tests {
         a.metadata.family = Some("kestral".to_string());
         let started = store.start_duel(spec(1), &a, &config("b")).unwrap();
         store
-            .record_games(started.matchups[0], &[game(0, true), game(1, false)])
+            .record_games(started.matchups[0], &[game(0), game(1)])
             .unwrap();
         let summaries = store.engine_summaries(started.id).unwrap();
 
@@ -1567,15 +1536,15 @@ mod tests {
         store.resume_ranking(pool.id).unwrap();
         pool = store.load_ranking(pool.id).unwrap();
         let matchup = store.start_ranking_batch(&pool, 0, 1, 1).unwrap();
-        store
-            .record_games(matchup, &[game(0, true), game(1, false)])
-            .unwrap();
+        let mut incomplete = game(1);
+        incomplete.points_a = 0.0;
+        store.record_games(matchup, &[game(0), incomplete]).unwrap();
         pool.next_batch += 1;
         let data = store.ranking_data(&pool).unwrap();
 
         assert_eq!(data.edges.len(), 1);
-        assert_eq!(data.edges[0].rated_games, 2);
-        assert!((data.edges[0].score_sum_a - 4.0 / 3.0).abs() < 1e-12);
+        assert_eq!(data.edges[0].rated_games, 1);
+        assert!((data.edges[0].score_sum_a - 2.0 / 3.0).abs() < 1e-12);
         assert_eq!(data.pair_counts[0][1], 1);
         assert_eq!(
             data.average_decision_time,
@@ -1616,11 +1585,8 @@ mod tests {
                 &config("b"),
             )
             .unwrap();
-        assert_eq!(shared.matchups[0].engine_a_id, old_a_id);
         let matchup = store.start_ranking_batch(&pool, 0, 1, 1).unwrap();
-        store
-            .record_games(matchup, &[game(0, true), game(1, false)])
-            .unwrap();
+        store.record_games(matchup, &[game(0), game(1)]).unwrap();
         store.pause_ranking(pool.id).unwrap();
         let mut a = config("a");
         a.metadata.family = Some("family-a".to_string());
@@ -1646,7 +1612,15 @@ mod tests {
         assert_eq!(a.configuration["model"], "large");
         assert_eq!(a.config.launch.options()["engine.ply"], "1");
         assert_ne!(a.build_id, old_a_id);
-        assert_eq!(shared.matchups[0].engine_a_id, old_a_id);
+        let shared_a_id: i64 = store
+            .conn
+            .query_row(
+                "SELECT engine_a_id FROM matchups WHERE benchmark_id = ?",
+                params![shared.id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(shared_a_id, old_a_id);
 
         let old_options: String = store
             .conn
@@ -1717,10 +1691,7 @@ mod tests {
         let pool = ranking_pool(&mut store);
         let matchup = store.start_ranking_batch(&pool, 1, 0, 2).unwrap();
         store
-            .record_games(
-                matchup,
-                &[game(0, true), game(1, false), game(2, true), game(3, false)],
-            )
+            .record_games(matchup, &[game(0), game(1), game(2), game(3)])
             .unwrap();
 
         let data = store.ranking_data(&pool).unwrap();
@@ -1757,11 +1728,7 @@ mod tests {
             )
             .unwrap();
 
-        assert!(
-            store
-                .record_games(matchup, &[game(0, true), game(1, false)])
-                .is_err()
-        );
+        assert!(store.record_games(matchup, &[game(0), game(1)]).is_err());
         let game_count: i64 = store
             .conn
             .query_row("SELECT COUNT(*) FROM games", [], |row| row.get(0))

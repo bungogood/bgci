@@ -23,34 +23,9 @@ pub struct RunSummary {
 }
 
 #[derive(Clone, Debug)]
-pub enum GameOutcome {
-    Normal,
-    Gammon,
-    Backgammon,
-    Unknown,
-}
-
-impl GameOutcome {
-    pub fn as_str(&self) -> &'static str {
-        match self {
-            Self::Normal => "normal",
-            Self::Gammon => "gammon",
-            Self::Backgammon => "backgammon",
-            Self::Unknown => "unknown",
-        }
-    }
-}
-
-#[derive(Clone, Debug)]
 pub struct GameRecord {
     pub game_idx: usize,
-    pub a_is_x: bool,
-    pub winner_a: Option<bool>,
-    pub outcome: Option<GameOutcome>,
-    pub points_x: f64,
-    pub points_o: f64,
     pub points_a: f64,
-    pub points_b: f64,
     pub plies: usize,
     pub a_decisions: usize,
     pub b_decisions: usize,
@@ -150,7 +125,7 @@ pub async fn run_matchup(cfg: &ResolvedMatchup, variant: Variant) -> Result<Matc
 
     games.sort_by_key(|game| game.game_idx);
     for (expected_idx, game) in games.iter().enumerate() {
-        if game.game_idx != expected_idx || game.a_is_x != (expected_idx % 2 == 0) {
+        if game.game_idx != expected_idx {
             return Err(format!(
                 "invalid mirrored game sequence at game {}",
                 expected_idx + 1
@@ -247,7 +222,7 @@ fn process_completed_game(
     done_games: usize,
 ) -> Result<GameRecord, String> {
     let game_idx = done.game_idx;
-    let a_is_x = done.a_is_x;
+    let a_is_x = game_idx % 2 == 0;
     let result = &done.result;
 
     debug!(
@@ -259,9 +234,7 @@ fn process_completed_game(
         "game complete"
     );
 
-    let winner_a = result.winner_x.map(|winner_x| winner_x == a_is_x);
-
-    let (a_game_points, b_game_points) = stats.record_game(&GameUpdate {
+    let a_game_points = stats.record_game(&GameUpdate {
         game_idx,
         a_is_x,
         winner_x: result.winner_x,
@@ -273,17 +246,6 @@ fn process_completed_game(
         a_decision_time: result.a_decision_time,
         b_decision_time: result.b_decision_time,
     });
-
-    let outcome = if result.winner_x.is_none() {
-        None
-    } else {
-        Some(match result.points_x.abs().round() as i32 {
-            3 => GameOutcome::Backgammon,
-            2 => GameOutcome::Gammon,
-            1 => GameOutcome::Normal,
-            _ => GameOutcome::Unknown,
-        })
-    };
 
     let elapsed = run_start.elapsed();
     let (line_engines, line_result, line_rate, line_decide, line_class, line_sides) =
@@ -307,13 +269,7 @@ fn process_completed_game(
 
     Ok(GameRecord {
         game_idx,
-        a_is_x,
-        winner_a,
-        outcome,
-        points_x: f64::from(result.points_x),
-        points_o: f64::from(result.points_o),
         points_a: f64::from(a_game_points),
-        points_b: f64::from(b_game_points),
         plies: result.plies,
         a_decisions: result.a_decisions,
         b_decisions: result.b_decisions,

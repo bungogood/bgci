@@ -36,7 +36,7 @@ impl DuelStats {
         Self::default()
     }
 
-    pub fn record_game(&mut self, update: &GameUpdate) -> (f32, f32) {
+    pub fn record_game(&mut self, update: &GameUpdate) -> f32 {
         let a_game_points = if update.a_is_x {
             update.points_x
         } else {
@@ -93,7 +93,7 @@ impl DuelStats {
         self.a_decision_time += update.a_decision_time;
         self.b_decision_time += update.b_decision_time;
 
-        (a_game_points, b_game_points)
+        a_game_points
     }
 
     pub fn status_view<'a>(

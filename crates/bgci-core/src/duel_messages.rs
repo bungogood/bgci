@@ -8,6 +8,5 @@ pub(crate) enum WorkerMessage {
 
 pub(crate) struct CompletedGame {
     pub(crate) game_idx: usize,
-    pub(crate) a_is_x: bool,
     pub(crate) result: DuelGameResult,
 }
