@@ -414,11 +414,19 @@ fn display_engine_name(engine: &bgci_core::benchmark::RankingEngine, verbose: bo
             .unwrap_or(key);
         configuration.insert(key, value);
     }
-    let options = configuration
-        .iter()
-        .map(|(key, value)| format!("{key}={value}"))
-        .collect::<Vec<_>>()
-        .join(",");
+    let mut options = Vec::new();
+    for key in ["ply", "top_k"] {
+        if let Some(value) = configuration.get(key) {
+            options.push(format!("{key}={value}"));
+        }
+    }
+    options.extend(
+        configuration
+            .iter()
+            .filter(|(key, _)| *key != &"ply" && *key != &"top_k")
+            .map(|(key, value)| format!("{key}={value}")),
+    );
+    let options = options.join(",");
     let alias = engine
         .name
         .split_once(':')

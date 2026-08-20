@@ -189,6 +189,18 @@ refuses changing any option that was already explicit:
 bgci rank refresh main --apply-options
 ```
 
+Canonical labels are executable specifications, not display-only names. They
+can be copied from ranking output into `duel`, `rank add`, or other engine-aware
+commands. Configuration selectors choose the matching registry alias and are
+removed before UBGI options are transmitted:
+
+```bash
+bgci duel \
+  -a "hedgehog@aureus-v0.1:ply=2,search=star2" \
+  -b "hedgehog@fox-v0.32:ply=2,search=star2" \
+  --pairs 100
+```
+
 Inspect configured and built-in engines with:
 
 ```bash

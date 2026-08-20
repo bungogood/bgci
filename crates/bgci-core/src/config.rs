@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -156,6 +156,13 @@ pub fn resolve_engine_shortcuts(cfg: &mut MatchupConfig) -> Result<(), String> {
 
 pub fn resolve_engine_reference(alias: &str) -> Result<EngineConfig, String> {
     let registry = load_user_engine_registry()?;
+    resolve_engine_reference_from_registry(alias, &registry)
+}
+
+fn resolve_engine_reference_from_registry(
+    alias: &str,
+    registry: &BTreeMap<String, EngineTemplate>,
+) -> Result<EngineConfig, String> {
     let mut engine = EngineConfig {
         name: alias.to_string(),
         family: None,
@@ -166,27 +173,36 @@ pub fn resolve_engine_reference(alias: &str) -> Result<EngineConfig, String> {
         env: BTreeMap::new(),
         options: BTreeMap::new(),
     };
-    resolve_engine_alias(&mut engine, &registry)?;
+    resolve_engine_alias(&mut engine, registry)?;
     Ok(engine)
 }
 
 pub fn resolve_engine_spec(spec: &str) -> Result<(String, EngineConfig), String> {
-    let parsed = parse_engine_spec(spec).map_err(|err| err.to_string())?;
+    let registry = load_user_engine_registry()?;
+    resolve_engine_spec_from_registry(spec, &registry)
+}
 
-    let (engine_ref, resolved_version) =
-        resolve_engine_ref_for_spec(&parsed.alias, parsed.version.as_deref())?;
-    let mut cfg = resolve_engine_reference(&engine_ref)?;
-    let base_options = cfg.options.clone();
+fn resolve_engine_spec_from_registry(
+    spec: &str,
+    registry: &BTreeMap<String, EngineTemplate>,
+) -> Result<(String, EngineConfig), String> {
+    let mut parsed = parse_engine_spec(spec).map_err(|err| err.to_string())?;
+
+    let (engine_ref, consumed_configuration) = select_engine_ref_for_spec(
+        &parsed.alias,
+        parsed.version.as_deref(),
+        &parsed.options,
+        registry,
+    )?;
+    let mut cfg = resolve_engine_reference_from_registry(&engine_ref, registry)?;
+    for key in consumed_configuration {
+        parsed.options.remove(&format!("engine.{key}"));
+    }
     for (k, v) in parsed.options {
         cfg.options.insert(k, v);
     }
 
-    let identity_options = non_default_options(&cfg.options, &base_options);
-    let key = format_engine_spec(&EngineSpec {
-        alias: parsed.alias.clone(),
-        version: resolved_version,
-        options: identity_options,
-    });
+    let key = canonical_engine_spec(&cfg, &parsed.alias, &cfg.options);
     Ok((key, cfg))
 }
 
@@ -195,42 +211,139 @@ pub fn engine_identity_from_spec_with_options(
     effective_options: &BTreeMap<String, String>,
 ) -> Result<String, String> {
     let parsed = parse_engine_spec(spec).map_err(|err| err.to_string())?;
-    let (engine_ref, resolved_version) =
-        resolve_engine_ref_for_spec(&parsed.alias, parsed.version.as_deref())?;
+    let (engine_ref, _) =
+        resolve_engine_ref_for_spec(&parsed.alias, parsed.version.as_deref(), &parsed.options)?;
     let base = resolve_engine_reference(&engine_ref)?;
-    let identity_options = non_default_options(effective_options, &base.options);
-    Ok(format_engine_spec(&EngineSpec {
-        alias: parsed.alias,
-        version: resolved_version,
-        options: identity_options,
-    }))
+    Ok(canonical_engine_spec(
+        &base,
+        &parsed.alias,
+        effective_options,
+    ))
 }
 
 fn resolve_engine_ref_for_spec(
     alias: &str,
     version: Option<&str>,
-) -> Result<(String, Option<String>), String> {
-    if let Some(v) = version {
-        return Ok((format!("{}@{}", alias, v), Some(v.to_string())));
+    selectors: &BTreeMap<String, String>,
+) -> Result<(String, BTreeSet<String>), String> {
+    let registry = load_user_engine_registry()?;
+    select_engine_ref_for_spec(alias, version, selectors, &registry)
+}
+
+fn select_engine_ref_for_spec(
+    alias: &str,
+    version: Option<&str>,
+    selectors: &BTreeMap<String, String>,
+    registry: &BTreeMap<String, EngineTemplate>,
+) -> Result<(String, BTreeSet<String>), String> {
+    if let Some(version) = version {
+        let direct = format!("{alias}@{version}").to_ascii_lowercase();
+        if registry.contains_key(&direct) {
+            return Ok((direct, BTreeSet::new()));
+        }
+    }
+    let alias = alias.to_ascii_lowercase();
+    let mut candidates = registry
+        .iter()
+        .filter(|(name, template)| {
+            name.as_str() == alias
+                || template
+                    .family
+                    .as_deref()
+                    .is_some_and(|family| family.eq_ignore_ascii_case(&alias))
+        })
+        .collect::<Vec<_>>();
+    if candidates.is_empty() {
+        let prefix = format!("{alias}@");
+        let mut versioned = registry
+            .keys()
+            .filter(|key| key.starts_with(&prefix))
+            .cloned()
+            .collect::<Vec<_>>();
+        if versioned.is_empty() {
+            return Ok((alias, BTreeSet::new()));
+        }
+        versioned.sort_by(|a, b| compare_versioned_alias(a, b));
+        return Ok((versioned.pop().unwrap(), BTreeSet::new()));
     }
 
-    let registry = load_user_engine_registry()?;
-    let prefix = format!("{}@", alias.to_ascii_lowercase());
-    let mut candidates: Vec<String> = registry
-        .keys()
-        .filter(|k| k.starts_with(&prefix))
-        .cloned()
-        .collect();
-    if candidates.is_empty() {
-        return Ok((alias.to_string(), None));
+    if let Some(version) = version {
+        candidates.retain(|(_, template)| {
+            template
+                .version
+                .as_deref()
+                .is_some_and(|candidate| candidate.eq_ignore_ascii_case(version))
+        });
+        if candidates.is_empty() {
+            return Err(format!(
+                "engine '{alias}@{version}' does not match any configured version"
+            ));
+        }
     }
-    candidates.sort_by(|a, b| compare_versioned_alias(a, b));
-    let selected = candidates
-        .last()
-        .cloned()
-        .unwrap_or_else(|| alias.to_string());
-    let selected_version = selected.split_once('@').map(|(_, v)| v.to_string());
-    Ok((selected, selected_version))
+
+    let configuration_keys = candidates
+        .iter()
+        .flat_map(|(_, template)| template.configuration.keys().cloned())
+        .collect::<BTreeSet<_>>();
+    let selected_configuration = selectors
+        .iter()
+        .filter_map(|(key, value)| {
+            let key = key.trim_start_matches("engine.");
+            configuration_keys
+                .contains(key)
+                .then_some((key.to_string(), value))
+        })
+        .collect::<BTreeMap<_, _>>();
+    candidates.retain(|(_, template)| {
+        selected_configuration
+            .iter()
+            .all(|(key, value)| template.configuration.get(key) == Some(*value))
+    });
+    if candidates.is_empty() {
+        return Err(format!(
+            "engine specification does not match a configured {alias} profile"
+        ));
+    }
+    candidates.sort_by(|(left_name, left), (right_name, right)| {
+        let left_matches = selectors
+            .iter()
+            .filter(|(key, value)| left.options.get(*key) == Some(*value))
+            .count();
+        let right_matches = selectors
+            .iter()
+            .filter(|(key, value)| right.options.get(*key) == Some(*value))
+            .count();
+        right_matches
+            .cmp(&left_matches)
+            .then_with(|| (left_name.as_str() != alias).cmp(&(right_name.as_str() != alias)))
+            .then_with(|| left_name.len().cmp(&right_name.len()))
+            .then_with(|| left_name.cmp(right_name))
+    });
+    Ok((
+        candidates[0].0.clone(),
+        selected_configuration.into_keys().collect(),
+    ))
+}
+
+fn canonical_engine_spec(
+    config: &EngineConfig,
+    fallback_alias: &str,
+    options: &BTreeMap<String, String>,
+) -> String {
+    let mut shown = config
+        .configuration
+        .iter()
+        .map(|(key, value)| (format!("engine.{key}"), value.clone()))
+        .collect::<BTreeMap<_, _>>();
+    shown.extend(options.clone());
+    format_engine_spec(&EngineSpec {
+        alias: config
+            .family
+            .clone()
+            .unwrap_or_else(|| fallback_alias.to_string()),
+        version: config.version.clone(),
+        options: shown,
+    })
 }
 
 fn compare_versioned_alias(a: &str, b: &str) -> std::cmp::Ordering {
@@ -260,19 +373,6 @@ fn compare_version_strings(a: &str, b: &str) -> std::cmp::Ordering {
         }
     }
     a.cmp(b)
-}
-
-fn non_default_options(
-    effective: &BTreeMap<String, String>,
-    defaults: &BTreeMap<String, String>,
-) -> BTreeMap<String, String> {
-    let mut out = BTreeMap::new();
-    for (k, v) in effective {
-        if defaults.get(k) != Some(v) {
-            out.insert(k.clone(), v.clone());
-        }
-    }
-    out
 }
 
 fn resolve_engine_alias(
@@ -506,20 +606,7 @@ pub fn load_toml<T: for<'de> Deserialize<'de>>(path: impl AsRef<Path>) -> Result
 
 #[cfg(test)]
 mod tests {
-    use super::{UserConfig, non_default_options};
-    use std::collections::BTreeMap;
-
-    #[test]
-    fn strips_default_options_for_identity() {
-        let mut effective = BTreeMap::new();
-        effective.insert("engine.ply".to_string(), "1".to_string());
-        effective.insert("engine.top_k".to_string(), "8".to_string());
-        let mut defaults = BTreeMap::new();
-        defaults.insert("engine.ply".to_string(), "1".to_string());
-        let out = non_default_options(&effective, &defaults);
-        assert_eq!(out.get("engine.ply"), None);
-        assert_eq!(out.get("engine.top_k"), Some(&"8".to_string()));
-    }
+    use super::{UserConfig, resolve_engine_spec_from_registry};
 
     #[test]
     fn parses_family_url_command_and_options() {
@@ -545,5 +632,70 @@ mod tests {
         assert_eq!(engine.url.as_deref(), Some("https://example.com/kestral"));
         assert_eq!(engine.command[0], "/opt/kestral");
         assert_eq!(engine.options["engine.ply"], "1");
+    }
+
+    #[test]
+    fn canonical_specs_round_trip_through_family_metadata() {
+        let config: UserConfig = toml::from_str(
+            r#"
+            [engines.hedgehog-expectimax]
+            family = "hedgehog"
+            version = "fox-v0.32"
+            command = ["hedgehog", "--model", "fox.ogxf"]
+            [engines.hedgehog-expectimax.options]
+            "engine.ply" = "2"
+            "engine.search" = "expectimax"
+
+            [engines.hedgehog-star2]
+            family = "hedgehog"
+            version = "fox-v0.32"
+            command = ["hedgehog", "--model", "fox.ogxf"]
+            [engines.hedgehog-star2.options]
+            "engine.ply" = "2"
+            "engine.search" = "star2"
+
+            [engines.hedgehog-aureus]
+            family = "hedgehog"
+            version = "aureus-v0.1"
+            command = ["hedgehog", "--model", "aureus.ogxf"]
+            [engines.hedgehog-aureus.options]
+            "engine.ply" = "1"
+
+            [engines.kestral]
+            family = "kestral"
+            configuration = { model = "prob5-best" }
+            command = ["kestral", "--model", "prob5.bin"]
+            [engines.kestral.options]
+            "engine.ply" = "1"
+            "#,
+        )
+        .unwrap();
+
+        let fox = "hedgehog@fox-v0.32:ply=2,search=star2";
+        let (fox_key, fox_config) =
+            resolve_engine_spec_from_registry(fox, &config.engines).unwrap();
+        assert_eq!(fox_key, fox);
+        assert_eq!(fox_config.command[2], "fox.ogxf");
+        assert_eq!(fox_config.options["engine.search"], "star2");
+
+        let aureus = "hedgehog@aureus-v0.1:ply=2,search=star2";
+        let (aureus_key, aureus_config) =
+            resolve_engine_spec_from_registry(aureus, &config.engines).unwrap();
+        assert_eq!(aureus_key, aureus);
+        assert_eq!(aureus_config.command[2], "aureus.ogxf");
+        assert_eq!(aureus_config.options["engine.ply"], "2");
+
+        let kestral = "kestral:ply=1,model=prob5-best";
+        let (kestral_key, kestral_config) =
+            resolve_engine_spec_from_registry(kestral, &config.engines).unwrap();
+        assert_eq!(kestral_key, kestral);
+        assert!(!kestral_config.options.contains_key("engine.model"));
+        assert_eq!(kestral_config.options["engine.ply"], "1");
+
+        let (alias_key, alias_config) =
+            resolve_engine_spec_from_registry("hedgehog-star2", &config.engines).unwrap();
+        assert_eq!(alias_key, fox);
+        assert_eq!(alias_config.command, fox_config.command);
+        assert_eq!(alias_config.options, fox_config.options);
     }
 }
