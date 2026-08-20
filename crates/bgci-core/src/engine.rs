@@ -193,12 +193,7 @@ impl EngineProcess {
         })
     }
 
-    pub fn choose_move(
-        &mut self,
-        position_id: &str,
-        dice: Dice,
-        _x_to_move: bool,
-    ) -> Result<String, String> {
+    pub fn choose_move(&mut self, position_id: &str, dice: Dice) -> Result<String, String> {
         self.send_position_and_dice(position_id, dice)?;
         self.send(ubgi::CMD_GO_CHEQUER)?;
         let mv = self.wait_bestmove().map_err(runtime_response_error)?;

@@ -1,5 +1,5 @@
-use std::sync::OnceLock;
-use std::{fs, path::PathBuf};
+use std::fs;
+use std::path::{Path, PathBuf};
 
 use bkgm::dice::Dice;
 use bkgm::{Game, State, VariantPosition, encode_move_steps};
@@ -7,14 +7,15 @@ use bkgm::{Game, State, VariantPosition, encode_move_steps};
 use super::runtime::{UbgiEngine, UbgiError, UbgiMove, run_ubgi_stdio};
 
 pub fn run(args: &[String]) -> Result<(), String> {
-    let overrides = parse_pubeval_args(args)?;
-    maybe_set_weight_overrides(overrides)?;
-    let mut adapter = PubevalAdapter;
+    let weights = load_weights(&parse_pubeval_args(args)?)?;
+    let mut adapter = PubevalAdapter { weights };
     run_ubgi_stdio(&mut adapter);
     Ok(())
 }
 
-struct PubevalAdapter;
+struct PubevalAdapter {
+    weights: Weights,
+}
 
 impl UbgiEngine for PubevalAdapter {
     fn id_name(&self) -> &'static str {
@@ -33,14 +34,16 @@ impl UbgiEngine for PubevalAdapter {
 
         let race = is_race_position(game.position());
         let mover_is_x = game.position().turn();
-        let w = weights();
 
         let mut best_idx = 0usize;
-        let mut best_score =
-            score_position(&to_pubeval_board(legal_positions[0], mover_is_x), race, w);
+        let mut best_score = score_position(
+            &to_pubeval_board(legal_positions[0], mover_is_x),
+            race,
+            &self.weights,
+        );
         for (idx, pos) in legal_positions.iter().enumerate().skip(1) {
             let board = to_pubeval_board(*pos, mover_is_x);
-            let score = score_position(&board, race, w);
+            let score = score_position(&board, race, &self.weights);
             if score > best_score {
                 best_score = score;
                 best_idx = idx;
@@ -63,31 +66,18 @@ struct PubevalArgs {
     contact_path: Option<PathBuf>,
 }
 
-fn weights() -> &'static Weights {
-    static WEIGHTS: OnceLock<Weights> = OnceLock::new();
-    WEIGHTS.get_or_init(|| {
-        let overrides = WEIGHT_OVERRIDES.get();
-        let race = overrides
-            .and_then(|o| o.race_path.as_ref())
-            .map(|path| load_weights_file(path, "WT.race"))
-            .unwrap_or_else(|| parse_weights(include_str!("weights/WT.race"), "WT.race"));
-        let contact = overrides
-            .and_then(|o| o.contact_path.as_ref())
-            .map(|path| load_weights_file(path, "WT.cntc"))
-            .unwrap_or_else(|| parse_weights(include_str!("weights/WT.cntc"), "WT.cntc"));
-        Weights { race, contact }
-    })
-}
-
-static WEIGHT_OVERRIDES: OnceLock<PubevalArgs> = OnceLock::new();
-
-fn maybe_set_weight_overrides(overrides: PubevalArgs) -> Result<(), String> {
-    if overrides.race_path.is_none() && overrides.contact_path.is_none() {
-        return Ok(());
-    }
-    WEIGHT_OVERRIDES
-        .set(overrides)
-        .map_err(|_| "pubeval weight overrides already initialized".to_string())
+fn load_weights(args: &PubevalArgs) -> Result<Weights, String> {
+    let race = match &args.race_path {
+        Some(path) => load_weights_file(path, "WT.race")?,
+        None => parse_weights(include_str!("weights/WT.race"), "WT.race")
+            .expect("embedded WT.race must contain 122 valid weights"),
+    };
+    let contact = match &args.contact_path {
+        Some(path) => load_weights_file(path, "WT.cntc")?,
+        None => parse_weights(include_str!("weights/WT.cntc"), "WT.cntc")
+            .expect("embedded WT.cntc must contain 122 valid weights"),
+    };
+    Ok(Weights { race, contact })
 }
 
 fn parse_pubeval_args(args: &[String]) -> Result<PubevalArgs, String> {
@@ -128,25 +118,27 @@ fn parse_pubeval_args(args: &[String]) -> Result<PubevalArgs, String> {
     Ok(parsed)
 }
 
-fn parse_weights(input: &str, label: &str) -> [f32; 122] {
+fn parse_weights(input: &str, label: &str) -> Result<[f32; 122], String> {
     let mut out = [0.0f32; 122];
     let mut count = 0usize;
     for token in input.split_whitespace() {
         if count >= out.len() {
-            panic!("{label} has too many weights");
+            return Err(format!("{label} has too many weights"));
         }
         out[count] = token
             .parse::<f32>()
-            .unwrap_or_else(|_| panic!("{label} has invalid float '{token}'"));
+            .map_err(|_| format!("{label} has invalid float '{token}'"))?;
         count += 1;
     }
-    assert!(count == 122, "{label} expected 122 weights, got {count}");
-    out
+    if count != 122 {
+        return Err(format!("{label} expected 122 weights, got {count}"));
+    }
+    Ok(out)
 }
 
-fn load_weights_file(path: &PathBuf, label: &str) -> [f32; 122] {
+fn load_weights_file(path: &Path, label: &str) -> Result<[f32; 122], String> {
     let content = fs::read_to_string(path)
-        .unwrap_or_else(|e| panic!("failed to read {label} '{}': {e}", path.display()));
+        .map_err(|e| format!("failed to read {label} '{}': {e}", path.display()))?;
     parse_weights(&content, label)
 }
 
@@ -270,4 +262,33 @@ fn encode_state<S: State>(p: S, mover_is_x: bool) -> [i32; 28] {
     board[27] = -opp_off;
 
     board
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse_weights;
+
+    #[test]
+    fn parse_weights_rejects_invalid_float() {
+        let mut values = vec!["0"; 122];
+        values[42] = "invalid";
+
+        let err = parse_weights(&values.join(" "), "test").unwrap_err();
+
+        assert_eq!(err, "test has invalid float 'invalid'");
+    }
+
+    #[test]
+    fn parse_weights_rejects_missing_weights() {
+        let err = parse_weights(&vec!["0"; 121].join(" "), "test").unwrap_err();
+
+        assert_eq!(err, "test expected 122 weights, got 121");
+    }
+
+    #[test]
+    fn parse_weights_rejects_extra_weights() {
+        let err = parse_weights(&vec!["0"; 123].join(" "), "test").unwrap_err();
+
+        assert_eq!(err, "test has too many weights");
+    }
 }

@@ -64,12 +64,12 @@ pub(crate) fn play_game(
 
         let decision_start = Instant::now();
         let chosen_move_raw = if a_to_move {
-            let picked = engine_a.choose_move(&position_id, dice, x_to_move)?;
+            let picked = engine_a.choose_move(&position_id, dice)?;
             a_decisions += 1;
             a_decision_time += decision_start.elapsed();
             picked
         } else {
-            let picked = engine_b.choose_move(&position_id, dice, x_to_move)?;
+            let picked = engine_b.choose_move(&position_id, dice)?;
             b_decisions += 1;
             b_decision_time += decision_start.elapsed();
             picked

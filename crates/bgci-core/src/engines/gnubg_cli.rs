@@ -1,6 +1,8 @@
 use std::fs::OpenOptions;
 use std::io::{BufRead, BufReader, Write};
 use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
+use std::thread;
+use std::time::{Duration, Instant};
 
 use bkgm::Game;
 use bkgm::codecs::gnuid;
@@ -26,7 +28,7 @@ impl GnubgSession {
         let mut child = cmd
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
+            .stderr(Stdio::null())
             .spawn()
             .map_err(|e| format!("spawn: {e}"))?;
 
@@ -95,9 +97,30 @@ impl GnubgSession {
     }
 
     fn shutdown(&mut self) {
+        if matches!(self.child.try_wait(), Ok(Some(_))) {
+            return;
+        }
+
         let _ = writeln!(self.stdin, "quit");
         let _ = self.stdin.flush();
+
+        let deadline = Instant::now() + Duration::from_millis(250);
+        while Instant::now() < deadline {
+            match self.child.try_wait() {
+                Ok(Some(_)) => return,
+                Ok(None) => thread::sleep(Duration::from_millis(10)),
+                Err(_) => break,
+            }
+        }
+
+        let _ = self.child.kill();
         let _ = self.child.wait();
+    }
+}
+
+impl Drop for GnubgSession {
+    fn drop(&mut self) {
+        self.shutdown();
     }
 }
 
@@ -108,7 +131,7 @@ pub fn run(_args: &[String]) -> Result<(), String> {
         session: None,
     };
     run_ubgi_stdio(&mut adapter);
-    if let Some(mut s) = adapter.session {
+    if let Some(s) = adapter.session.as_mut() {
         s.shutdown();
     }
     Ok(())
