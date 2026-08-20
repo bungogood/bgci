@@ -12,45 +12,51 @@ use bkgm::dice::Dice;
 use bkgm::ubgi::parse_key_line;
 use tracing::{debug, error, info};
 
-use crate::config::{ResolvedEngine, engine_identity_from_spec_with_options, resolve_engine_spec};
+use crate::config::{ResolvedEngine, canonicalize_resolved_engine_name, resolve_engine_specs};
 
-pub fn resolve_engine(spec: &str) -> Result<ResolvedEngine, String> {
-    let (_, config) = resolve_engine_spec(spec)?;
-    let mut config = filter_supported_engine_options(&config);
-    config.name = engine_identity_from_spec_with_options(spec, config.launch.options())?;
-    Ok(config)
+pub fn resolve_and_finalize_engines(specs: &[String]) -> Result<Vec<ResolvedEngine>, String> {
+    let mut engines = Vec::with_capacity(specs.len());
+    for engine in resolve_engine_specs(specs)? {
+        let engine = finalize_resolved_engine(engine);
+        if engines
+            .iter()
+            .any(|existing: &ResolvedEngine| existing.launch == engine.launch)
+        {
+            return Err(format!("duplicate resolved engine: {}", engine.name));
+        }
+        engines.push(engine);
+    }
+    Ok(engines)
 }
 
-pub fn filter_supported_engine_options(cfg: &ResolvedEngine) -> ResolvedEngine {
-    let mut filtered = cfg.clone();
-    let Ok(supported) = discover_supported_keys(cfg) else {
-        return filtered;
-    };
-    if supported.is_empty() {
-        return filtered;
+pub fn finalize_resolved_engine(mut engine: ResolvedEngine) -> ResolvedEngine {
+    if let Ok(supported) = probe_supported_engine_options(&engine)
+        && !supported.is_empty()
+    {
+        let unsupported: Vec<String> = engine
+            .launch
+            .options()
+            .keys()
+            .filter(|k| !supported.contains(*k))
+            .cloned()
+            .collect();
+        if !unsupported.is_empty() {
+            eprintln!(
+                "warning: engine '{}' does not support {}; ignoring",
+                engine.name,
+                unsupported.join(", ")
+            );
+        }
+        engine
+            .launch
+            .options_mut()
+            .retain(|k, _| supported.contains(k));
     }
-    let unsupported: Vec<String> = filtered
-        .launch
-        .options()
-        .keys()
-        .filter(|k| !supported.contains(*k))
-        .cloned()
-        .collect();
-    if !unsupported.is_empty() {
-        eprintln!(
-            "warning: engine '{}' does not support {}; ignoring",
-            cfg.name,
-            unsupported.join(", ")
-        );
-    }
-    filtered
-        .launch
-        .options_mut()
-        .retain(|k, _| supported.contains(k));
-    filtered
+    canonicalize_resolved_engine_name(&mut engine);
+    engine
 }
 
-fn discover_supported_keys(cfg: &ResolvedEngine) -> Result<HashSet<String>, String> {
+fn probe_supported_engine_options(cfg: &ResolvedEngine) -> Result<HashSet<String>, String> {
     let mut engine = EngineProcess::spawn(cfg)?;
     engine.send_command(ubgi::CMD_UBGI)?;
     let mut keys = HashSet::new();

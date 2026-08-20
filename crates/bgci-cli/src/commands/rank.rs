@@ -4,9 +4,9 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 use bgci_core::benchmark::{Database, RankingPool, RankingSpec, default_db_path};
 use bgci_core::common::parse_variant;
-use bgci_core::config::{ResolvedEngine, ResolvedMatchup};
+use bgci_core::config::ResolvedMatchup;
 use bgci_core::duel_runner::run_matchup;
-use bgci_core::engine::resolve_engine;
+use bgci_core::engine::resolve_and_finalize_engines;
 use bgci_core::ranking::{
     fit_rating_model, is_provisional, select_pair_for_model, transitivity_diagnostics,
 };
@@ -17,10 +17,6 @@ pub struct RankArgs {
     /// Application database path; defaults to the XDG data directory.
     #[arg(long = "db", global = true)]
     db_path: Option<PathBuf>,
-
-    /// Include effective engine options in ranking names.
-    #[arg(short, long, global = true)]
-    verbose: bool,
 
     #[command(subcommand)]
     command: RankCommand,
@@ -137,7 +133,6 @@ struct SessionArgs {
 
 pub async fn run(args: RankArgs) -> Result<(), String> {
     let db_path = args.db_path.unwrap_or_else(default_db_path);
-    let verbose = args.verbose;
     let mut store = Database::open(&db_path)?;
     match args.command {
         RankCommand::Create(args) => {
@@ -148,7 +143,7 @@ pub async fn run(args: RankArgs) -> Result<(), String> {
             if !args.established_rd.is_finite() || args.established_rd <= 0.0 {
                 return Err("--established-rd must be a positive number".to_string());
             }
-            let engines = resolve_engines(&args.engines)?;
+            let engines = resolve_and_finalize_engines(&args.engines)?;
             let pool = store.start_ranking(
                 RankingSpec {
                     name: &args.name,
@@ -162,7 +157,7 @@ pub async fn run(args: RankArgs) -> Result<(), String> {
                 &engines,
             )?;
             println!("ranking '{}' created -> {}", pool.name, db_path.display());
-            show_ranking(&store, &pool, false, verbose)
+            show_ranking(&store, &pool, false)
         }
         RankCommand::Run(args) => {
             validate_session(&args.session)?;
@@ -170,17 +165,17 @@ pub async fn run(args: RankArgs) -> Result<(), String> {
             store.resume_ranking(pool.id)?;
             let pool = store.load_ranking_by_name(&args.name)?;
             println!("running ranking '{}'", pool.name);
-            run_pool(&mut store, pool, args.session, verbose).await
+            run_pool(&mut store, pool, args.session).await
         }
         RankCommand::Add(args) => {
-            let engines = resolve_engines(&args.engines)?;
+            let engines = resolve_and_finalize_engines(&args.engines)?;
             let pool = store.add_ranking_engines(&args.name, &engines)?;
             println!(
                 "added {} engine(s) to ranking '{}'",
                 engines.len(),
                 pool.name
             );
-            show_ranking(&store, &pool, false, verbose)
+            show_ranking(&store, &pool, false)
         }
         RankCommand::Refresh(args) => {
             let pool = store.load_ranking_by_name(&args.name)?;
@@ -189,15 +184,15 @@ pub async fn run(args: RankArgs) -> Result<(), String> {
                 .iter()
                 .map(|engine| engine.name.clone())
                 .collect::<Vec<_>>();
-            let engines = resolve_engines(&specs)?;
+            let engines = resolve_and_finalize_engines(&specs)?;
             let pool =
                 store.refresh_ranking_engine_metadata(&args.name, &engines, args.apply_options)?;
             println!("refreshed metadata for ranking '{}'", pool.name);
-            show_ranking(&store, &pool, false, verbose)
+            show_ranking(&store, &pool, false)
         }
         RankCommand::Show(args) => {
             let pool = store.load_ranking_by_name(&args.name)?;
-            show_ranking(&store, &pool, args.diagnostics, verbose)
+            show_ranking(&store, &pool, args.diagnostics)
         }
         RankCommand::List => {
             let rankings = store.list_rankings()?;
@@ -221,7 +216,6 @@ async fn run_pool(
     store: &mut Database,
     mut pool: RankingPool,
     session: SessionArgs,
-    verbose: bool,
 ) -> Result<(), String> {
     let variant = parse_variant(&pool.variant)?;
     let stop = Arc::new(AtomicBool::new(false));
@@ -304,7 +298,7 @@ async fn run_pool(
         }
         pool.next_batch += 1;
         session_pairs += batch_pairs;
-        if let Err(error) = show_ranking(store, &pool, false, verbose) {
+        if let Err(error) = show_ranking(store, &pool, false) {
             break pause(store, &pool.name, pool.id, Some(error));
         }
     };
@@ -312,19 +306,14 @@ async fn run_pool(
     result
 }
 
-fn show_ranking(
-    store: &Database,
-    pool: &RankingPool,
-    diagnostics: bool,
-    verbose: bool,
-) -> Result<(), String> {
+fn show_ranking(store: &Database, pool: &RankingPool, diagnostics: bool) -> Result<(), String> {
     let data = store.ranking_data(pool)?;
     let model = fit_rating_model(pool.engines.len(), &data.edges);
     let mut ratings = model.ratings.clone();
     ratings.sort_by(|a, b| b.elo.total_cmp(&a.elo));
     println!();
     println!("ranking '{}' [{}]", pool.name, pool.status);
-    let engine_width = if verbose { 72 } else { 48 };
+    let engine_width = 48;
     println!(
         " rank  {:<engine_width$}  rating     rd  move ms   games",
         "engine"
@@ -344,10 +333,9 @@ fn show_ranking(
         let move_ms = data.average_decision_time[rating.index]
             .map(|duration| format!("{:.2}", duration.as_secs_f64() * 1_000.0))
             .unwrap_or_else(|| "-".to_string());
-        let engine_name = display_engine_name(engine, verbose);
         println!(
             "{:>5}  {:<engine_width$}  {:>7.1}  {:>5.1}  {:>7}  {:>6}",
-            rank_label, engine_name, rating.elo, rating.rd, move_ms, rating.games
+            rank_label, engine.name, rating.elo, rating.rd, move_ms, rating.games
         );
     }
     if has_provisional {
@@ -403,72 +391,6 @@ fn show_ranking(
     }
     println!();
     Ok(())
-}
-
-fn display_engine_name(engine: &bgci_core::benchmark::RankingEngine, verbose: bool) -> String {
-    let mut configuration = std::collections::BTreeMap::new();
-    for (key, value) in engine
-        .configuration
-        .iter()
-        .chain(engine.config.launch.options())
-    {
-        let key = key
-            .strip_prefix("engine.")
-            .or_else(|| key.strip_prefix("game."))
-            .unwrap_or(key);
-        configuration.insert(key, value);
-    }
-    let mut options = Vec::new();
-    for key in ["ply", "top_k"] {
-        if let Some(value) = configuration.get(key) {
-            options.push(format!("{key}={value}"));
-        }
-    }
-    options.extend(
-        configuration
-            .iter()
-            .filter(|(key, _)| *key != &"ply" && *key != &"top_k")
-            .map(|(key, value)| format!("{key}={value}")),
-    );
-    let options = options.join(",");
-    let alias = engine
-        .name
-        .split_once(':')
-        .map_or(engine.name.as_str(), |v| v.0);
-    let (alias_base, alias_version) = alias
-        .split_once('@')
-        .map_or((alias, None), |(base, version)| (base, Some(version)));
-    let base = engine.family.as_deref().unwrap_or(alias_base);
-    let version = engine.version.as_deref().or(alias_version);
-    let mut label = base.to_string();
-    if let Some(version) = version.map(str::trim).filter(|version| !version.is_empty()) {
-        label.push('@');
-        label.push_str(version.trim_start_matches('@'));
-    }
-    if !options.is_empty() {
-        label.push(':');
-        label.push_str(&options);
-    }
-    if verbose && label != engine.name {
-        format!("{label} [alias={}]", engine.name)
-    } else {
-        label
-    }
-}
-
-fn resolve_engines(specs: &[String]) -> Result<Vec<ResolvedEngine>, String> {
-    let mut engines = Vec::with_capacity(specs.len());
-    for spec in specs {
-        let engine = resolve_engine(spec)?;
-        if engines
-            .iter()
-            .any(|existing: &ResolvedEngine| existing.name == engine.name)
-        {
-            return Err(format!("duplicate resolved engine: {}", engine.name));
-        }
-        engines.push(engine);
-    }
-    Ok(engines)
 }
 
 fn validate_session(args: &SessionArgs) -> Result<(), String> {

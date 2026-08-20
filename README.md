@@ -77,7 +77,6 @@ Add engines later as provisional members, without rebuilding the table:
 bgci rank add main --engines kestral-dmp-best kestral-light
 bgci rank list
 bgci rank show main
-bgci rank show main -v # include effective engine options
 bgci rank run main --parallel 8
 ```
 

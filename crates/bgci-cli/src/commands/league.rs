@@ -2,9 +2,9 @@ use std::path::PathBuf;
 
 use bgci_core::benchmark::{BenchmarkSpec, Database, default_db_path};
 use bgci_core::common::parse_variant;
-use bgci_core::config::{ResolvedEngine, ResolvedMatchup};
+use bgci_core::config::ResolvedMatchup;
 use bgci_core::duel_runner::run_matchup;
-use bgci_core::engine::resolve_engine;
+use bgci_core::engine::resolve_and_finalize_engines;
 use clap::Args;
 
 #[derive(Debug, Args)]
@@ -46,17 +46,7 @@ pub async fn run(args: LeagueArgs) -> Result<(), String> {
     validate_pairs(args.pairs_per_matchup)?;
     let max_plies = args.max_plies.max(1);
     let variant = parse_variant(&args.variant)?;
-    let mut engines = Vec::new();
-    for spec in &args.engines {
-        let engine = resolve_engine(spec)?;
-        if engines
-            .iter()
-            .any(|existing: &ResolvedEngine| existing.name == engine.name)
-        {
-            return Err(format!("duplicate resolved engine: {}", engine.name));
-        }
-        engines.push(engine);
-    }
+    let engines = resolve_and_finalize_engines(&args.engines)?;
 
     let db_path = args.db_path.unwrap_or_else(default_db_path);
     let mut store = Database::open(&db_path)?;

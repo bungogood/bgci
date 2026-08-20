@@ -38,11 +38,11 @@ impl Default for MatchupConfig {
 #[derive(Debug, Clone, Deserialize)]
 pub struct EngineInput {
     pub name: String,
-    #[serde(default, skip_serializing)]
+    #[serde(default)]
     pub family: Option<String>,
-    #[serde(default, skip_serializing)]
+    #[serde(default)]
     pub version: Option<String>,
-    #[serde(default, skip_serializing)]
+    #[serde(default)]
     pub configuration: BTreeMap<String, String>,
     #[serde(default)]
     pub engine: Option<String>,
@@ -254,15 +254,23 @@ fn resolve_engine_reference_from_registry(
     resolve_engine_input_from_registry(engine, registry)
 }
 
-pub fn resolve_engine_spec(spec: &str) -> Result<(String, ResolvedEngine), String> {
+pub fn resolve_engine_spec(spec: &str) -> Result<ResolvedEngine, String> {
     let registry = load_user_engine_registry()?;
     resolve_engine_spec_from_registry(spec, &registry)
+}
+
+pub fn resolve_engine_specs(specs: &[String]) -> Result<Vec<ResolvedEngine>, String> {
+    let registry = load_user_engine_registry()?;
+    specs
+        .iter()
+        .map(|spec| resolve_engine_spec_from_registry(spec, &registry))
+        .collect()
 }
 
 fn resolve_engine_spec_from_registry(
     spec: &str,
     registry: &BTreeMap<String, EngineTemplate>,
-) -> Result<(String, ResolvedEngine), String> {
+) -> Result<ResolvedEngine, String> {
     let mut parsed = parse_engine_spec(spec).map_err(|err| err.to_string())?;
 
     let (engine_ref, consumed_configuration) = select_engine_ref_for_spec(
@@ -279,33 +287,9 @@ fn resolve_engine_spec_from_registry(
         cfg.launch.options_mut().insert(k, v);
     }
 
-    let key = canonical_engine_spec(&cfg, &parsed.alias, cfg.launch.options());
-    cfg.name = key.clone();
-    Ok((key, cfg))
-}
-
-pub fn engine_identity_from_spec_with_options(
-    spec: &str,
-    effective_options: &BTreeMap<String, String>,
-) -> Result<String, String> {
-    let parsed = parse_engine_spec(spec).map_err(|err| err.to_string())?;
-    let (engine_ref, _) =
-        resolve_engine_ref_for_spec(&parsed.alias, parsed.version.as_deref(), &parsed.options)?;
-    let base = resolve_engine_reference(&engine_ref)?;
-    Ok(canonical_engine_spec(
-        &base,
-        &parsed.alias,
-        effective_options,
-    ))
-}
-
-fn resolve_engine_ref_for_spec(
-    alias: &str,
-    version: Option<&str>,
-    selectors: &BTreeMap<String, String>,
-) -> Result<(String, BTreeSet<String>), String> {
-    let registry = load_user_engine_registry()?;
-    select_engine_ref_for_spec(alias, version, selectors, &registry)
+    cfg.name = parsed.alias;
+    canonicalize_resolved_engine_name(&mut cfg);
+    Ok(cfg)
 }
 
 fn select_engine_ref_for_spec(
@@ -403,27 +387,27 @@ fn select_engine_ref_for_spec(
     ))
 }
 
-fn canonical_engine_spec(
-    config: &ResolvedEngine,
-    fallback_alias: &str,
-    options: &BTreeMap<String, String>,
-) -> String {
+pub fn canonicalize_resolved_engine_name(config: &mut ResolvedEngine) {
+    let alias_with_version = config
+        .name
+        .split_once(':')
+        .map_or(config.name.as_str(), |(alias, _)| alias);
+    let fallback_alias = alias_with_version
+        .split_once('@')
+        .map_or(alias_with_version, |(alias, _)| alias)
+        .to_string();
     let mut shown = config
         .metadata
         .configuration
         .iter()
         .map(|(key, value)| (format!("engine.{key}"), value.clone()))
         .collect::<BTreeMap<_, _>>();
-    shown.extend(options.clone());
-    format_engine_spec(&EngineSpec {
-        alias: config
-            .metadata
-            .family
-            .clone()
-            .unwrap_or_else(|| fallback_alias.to_string()),
+    shown.extend(config.launch.options().clone());
+    config.name = format_engine_spec(&EngineSpec {
+        alias: config.metadata.family.clone().unwrap_or(fallback_alias),
         version: config.metadata.version.clone(),
         options: shown,
-    })
+    });
 }
 
 fn compare_versioned_alias(a: &str, b: &str) -> std::cmp::Ordering {
@@ -589,11 +573,22 @@ fn load_user_engine_registry() -> Result<BTreeMap<String, EngineTemplate>, Strin
     let parsed: UserConfig =
         toml::from_str(&content).map_err(|e| format!("parse config {}: {e}", path.display()))?;
 
-    Ok(parsed
-        .engines
-        .into_iter()
-        .map(|(name, template)| (name.to_ascii_lowercase(), template))
-        .collect())
+    normalize_engine_registry(parsed)
+}
+
+fn normalize_engine_registry(
+    config: UserConfig,
+) -> Result<BTreeMap<String, EngineTemplate>, String> {
+    let mut registry = BTreeMap::new();
+    for (name, template) in config.engines {
+        let normalized = name.to_ascii_lowercase();
+        if registry.insert(normalized.clone(), template).is_some() {
+            return Err(format!(
+                "duplicate engine aliases differing only by case: '{normalized}'"
+            ));
+        }
+    }
+    Ok(registry)
 }
 
 fn locate_user_config_path() -> Option<PathBuf> {
@@ -612,15 +607,6 @@ fn locate_user_config_path() -> Option<PathBuf> {
     }
 
     None
-}
-
-pub fn list_engine_aliases() -> Result<Vec<String>, String> {
-    let mut names = builtin_engine_names();
-    let registry = load_user_engine_registry()?;
-    names.extend(registry.keys().cloned());
-    names.sort();
-    names.dedup();
-    Ok(names)
 }
 
 pub fn list_engine_alias_details() -> Result<Vec<EngineAliasDetail>, String> {
@@ -699,7 +685,8 @@ pub fn load_toml<T: for<'de> Deserialize<'de>>(path: impl AsRef<Path>) -> Result
 #[cfg(test)]
 mod tests {
     use super::{
-        MatchupConfig, UserConfig, resolve_engine_shortcuts, resolve_engine_spec_from_registry,
+        MatchupConfig, UserConfig, canonicalize_resolved_engine_name, normalize_engine_registry,
+        resolve_engine_shortcuts, resolve_engine_spec_from_registry,
     };
 
     #[test]
@@ -810,29 +797,71 @@ mod tests {
         .unwrap();
 
         let fox = "hedgehog@fox-v0.32:ply=2,search=star2";
-        let (fox_key, fox_config) =
-            resolve_engine_spec_from_registry(fox, &config.engines).unwrap();
-        assert_eq!(fox_key, fox);
+        let fox_config = resolve_engine_spec_from_registry(fox, &config.engines).unwrap();
+        assert_eq!(fox_config.name, fox);
         assert_eq!(fox_config.launch.command()[2], "fox.ogxf");
         assert_eq!(fox_config.launch.options()["engine.search"], "star2");
 
         let aureus = "hedgehog@aureus-v0.1:ply=2,search=star2";
-        let (aureus_key, aureus_config) =
-            resolve_engine_spec_from_registry(aureus, &config.engines).unwrap();
-        assert_eq!(aureus_key, aureus);
+        let aureus_config = resolve_engine_spec_from_registry(aureus, &config.engines).unwrap();
+        assert_eq!(aureus_config.name, aureus);
         assert_eq!(aureus_config.launch.command()[2], "aureus.ogxf");
         assert_eq!(aureus_config.launch.options()["engine.ply"], "2");
 
         let kestral = "kestral:ply=1,model=prob5-best";
-        let (kestral_key, kestral_config) =
-            resolve_engine_spec_from_registry(kestral, &config.engines).unwrap();
-        assert_eq!(kestral_key, kestral);
+        let kestral_config = resolve_engine_spec_from_registry(kestral, &config.engines).unwrap();
+        assert_eq!(kestral_config.name, kestral);
         assert!(!kestral_config.launch.options().contains_key("engine.model"));
         assert_eq!(kestral_config.launch.options()["engine.ply"], "1");
 
-        let (alias_key, alias_config) =
+        let alias_config =
             resolve_engine_spec_from_registry("hedgehog-star2", &config.engines).unwrap();
-        assert_eq!(alias_key, fox);
+        assert_eq!(alias_config.name, fox);
         assert_eq!(alias_config.launch, fox_config.launch);
+    }
+
+    #[test]
+    fn rejects_case_insensitive_duplicate_registry_aliases() {
+        let config: UserConfig = toml::from_str(
+            r#"
+            [engines.Hawk]
+            command = "hawk-a"
+            [engines.hawk]
+            command = "hawk-b"
+            "#,
+        )
+        .unwrap();
+
+        let error = normalize_engine_registry(config).unwrap_err();
+        assert!(error.contains("duplicate engine aliases differing only by case"));
+    }
+
+    #[test]
+    fn canonicalizes_effective_options_after_overrides_and_filtering() {
+        let config: UserConfig = toml::from_str(
+            r#"
+            [engines.hawk]
+            family = "hawk"
+            version = "v1"
+            configuration = { model = "small" }
+            command = "hawk"
+            [engines.hawk.options]
+            "engine.ply" = "1"
+            "engine.search" = "star2"
+            "game.variant" = "backgammon"
+            "#,
+        )
+        .unwrap();
+        let mut engine = resolve_engine_spec_from_registry("hawk:ply=2", &config.engines).unwrap();
+
+        engine.launch.options_mut().remove("engine.search");
+        engine.launch.options_mut().remove("game.variant");
+        engine
+            .launch
+            .options_mut()
+            .insert("engine.ply".to_string(), "3".to_string());
+        canonicalize_resolved_engine_name(&mut engine);
+
+        assert_eq!(engine.name, "hawk@v1:ply=3,model=small");
     }
 }

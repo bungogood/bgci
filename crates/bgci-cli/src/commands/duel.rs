@@ -3,11 +3,10 @@ use std::path::PathBuf;
 use bgci_core::benchmark::{BenchmarkSpec, Database, MatchupHandle, default_db_path};
 use bgci_core::common::parse_variant;
 use bgci_core::config::{
-    MatchupConfig, ResolvedMatchup, engine_identity_from_spec_with_options, load_toml,
-    resolve_engine_input, resolve_engine_spec,
+    MatchupConfig, ResolvedMatchup, load_toml, resolve_engine_input, resolve_engine_spec,
 };
 use bgci_core::duel_runner::run_matchup;
-use bgci_core::engine::filter_supported_engine_options;
+use bgci_core::engine::finalize_resolved_engine;
 use clap::Args;
 use tracing::info;
 
@@ -79,16 +78,8 @@ pub struct DuelArgs {
 
 pub async fn run(args: DuelArgs) -> Result<(), String> {
     let mut cfg = build_matchup_config(&args)?;
-    cfg.engine_a = filter_supported_engine_options(&cfg.engine_a);
-    cfg.engine_b = filter_supported_engine_options(&cfg.engine_b);
-    if let Some(spec) = &args.engine_a {
-        cfg.engine_a.name =
-            engine_identity_from_spec_with_options(spec, cfg.engine_a.launch.options())?;
-    }
-    if let Some(spec) = &args.engine_b {
-        cfg.engine_b.name =
-            engine_identity_from_spec_with_options(spec, cfg.engine_b.launch.options())?;
-    }
+    cfg.engine_a = finalize_resolved_engine(cfg.engine_a);
+    cfg.engine_b = finalize_resolved_engine(cfg.engine_b);
 
     let _log_guard = logging::init_tracing(&cfg.log_level, args.log_file.as_deref())?;
     let variant = parse_variant(&cfg.variant)?;
@@ -190,11 +181,11 @@ fn build_matchup_config(args: &DuelArgs) -> Result<ResolvedMatchup, String> {
         cfg.log_level = log_level.clone();
     }
     let engine_a = match &args.engine_a {
-        Some(engine_a) => resolve_engine_spec(engine_a)?.1,
+        Some(engine_a) => resolve_engine_spec(engine_a)?,
         None => resolve_engine_input(cfg.engine_a)?,
     };
     let engine_b = match &args.engine_b {
-        Some(engine_b) => resolve_engine_spec(engine_b)?.1,
+        Some(engine_b) => resolve_engine_spec(engine_b)?,
         None => resolve_engine_input(cfg.engine_b)?,
     };
     let mut cfg = ResolvedMatchup {
@@ -227,15 +218,6 @@ fn build_matchup_config(args: &DuelArgs) -> Result<ResolvedMatchup, String> {
             .launch
             .options_mut()
             .insert("engine.ply".to_string(), ply.to_string());
-    }
-
-    if let Some(spec) = &args.engine_a {
-        cfg.engine_a.name =
-            engine_identity_from_spec_with_options(spec, cfg.engine_a.launch.options())?;
-    }
-    if let Some(spec) = &args.engine_b {
-        cfg.engine_b.name =
-            engine_identity_from_spec_with_options(spec, cfg.engine_b.launch.options())?;
     }
 
     Ok(cfg)
