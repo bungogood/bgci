@@ -18,6 +18,10 @@ pub struct RankArgs {
     #[arg(long = "db", global = true)]
     db_path: Option<PathBuf>,
 
+    /// Include effective engine options in ranking names.
+    #[arg(short, long, global = true)]
+    verbose: bool,
+
     #[command(subcommand)]
     command: RankCommand,
 }
@@ -120,6 +124,7 @@ struct SessionArgs {
 
 pub async fn run(args: RankArgs) -> Result<(), String> {
     let db_path = args.db_path.unwrap_or_else(default_benchmark_db_path);
+    let verbose = args.verbose;
     let mut store = BenchmarkStore::open(&db_path)?;
     match args.command {
         RankCommand::Create(args) => {
@@ -144,7 +149,7 @@ pub async fn run(args: RankArgs) -> Result<(), String> {
                 &engines,
             )?;
             println!("ranking '{}' created -> {}", pool.name, db_path.display());
-            show_ranking(&store, &pool, false)
+            show_ranking(&store, &pool, false, verbose)
         }
         RankCommand::Run(args) => {
             validate_session(&args.session)?;
@@ -152,7 +157,7 @@ pub async fn run(args: RankArgs) -> Result<(), String> {
             store.resume_ranking(pool.id)?;
             let pool = store.load_ranking_by_name(&args.name)?;
             println!("running ranking '{}'", pool.name);
-            run_pool(&mut store, pool, args.session).await
+            run_pool(&mut store, pool, args.session, verbose).await
         }
         RankCommand::Add(args) => {
             let engines = resolve_engines(&args.engines)?;
@@ -162,11 +167,11 @@ pub async fn run(args: RankArgs) -> Result<(), String> {
                 engines.len(),
                 pool.name
             );
-            show_ranking(&store, &pool, false)
+            show_ranking(&store, &pool, false, verbose)
         }
         RankCommand::Show(args) => {
             let pool = store.load_ranking_by_name(&args.name)?;
-            show_ranking(&store, &pool, args.diagnostics)
+            show_ranking(&store, &pool, args.diagnostics, verbose)
         }
         RankCommand::List => {
             let rankings = store.list_rankings()?;
@@ -190,6 +195,7 @@ async fn run_pool(
     store: &mut BenchmarkStore,
     mut pool: RankingPool,
     session: SessionArgs,
+    verbose: bool,
 ) -> Result<(), String> {
     let variant = parse_variant(&pool.variant)?;
     let stop = Arc::new(AtomicBool::new(false));
@@ -272,7 +278,7 @@ async fn run_pool(
         }
         pool.next_batch += 1;
         session_pairs += batch_pairs;
-        if let Err(error) = show_ranking(store, &pool, false) {
+        if let Err(error) = show_ranking(store, &pool, false, verbose) {
             break pause(store, &pool.name, pool.id, Some(error));
         }
     };
@@ -284,6 +290,7 @@ fn show_ranking(
     store: &BenchmarkStore,
     pool: &RankingPool,
     diagnostics: bool,
+    verbose: bool,
 ) -> Result<(), String> {
     let data = store.ranking_data(pool)?;
     let model = fit_rating_model(pool.engines.len(), &data.edges);
@@ -305,12 +312,13 @@ fn show_ranking(
     }
     println!();
     println!("ranking '{}' [{}]", pool.name, pool.status);
+    let engine_width = if verbose { 48 } else { 29 };
     println!(
-        " rank  tier  status       family             engine                         rating     rd  move ms   games  pairs"
+        " rank  tier  status       family             {:<engine_width$}  rating     rd  move ms   games",
+        "engine"
     );
     for (rank, rating) in ratings.iter().enumerate() {
         let engine = &pool.engines[rating.index];
-        let pairs = data.pair_counts[rating.index].iter().sum::<usize>();
         let status = if is_provisional(
             rating,
             &data.pair_counts,
@@ -325,18 +333,18 @@ fn show_ranking(
         let move_ms = data.average_decision_time[rating.index]
             .map(|duration| format!("{:.2}", duration.as_secs_f64() * 1_000.0))
             .unwrap_or_else(|| "-".to_string());
+        let engine_name = display_engine_name(engine, verbose);
         println!(
-            "{:>5}  {:>4}  {:<11}  {:<18}  {:<29}  {:>7.1}  {:>5.1}  {:>7}  {:>6}  {:>5}",
+            "{:>5}  {:>4}  {:<11}  {:<18}  {:<engine_width$}  {:>7.1}  {:>5.1}  {:>7}  {:>6}",
             rank + 1,
             tiers[rank],
             status,
             engine.family.as_deref().unwrap_or("-"),
-            engine.name,
+            engine_name,
             rating.elo,
             rating.rd,
             move_ms,
-            rating.games,
-            pairs
+            rating.games
         );
     }
     if diagnostics {
@@ -371,6 +379,30 @@ fn show_ranking(
     }
     println!();
     Ok(())
+}
+
+fn display_engine_name(engine: &bgci_core::benchmark::RankingEngine, verbose: bool) -> String {
+    if !verbose || engine.config.options.is_empty() {
+        return engine.name.clone();
+    }
+    let options = engine
+        .config
+        .options
+        .iter()
+        .map(|(key, value)| {
+            let key = key
+                .strip_prefix("engine.")
+                .or_else(|| key.strip_prefix("game."))
+                .unwrap_or(key);
+            format!("{key}={value}")
+        })
+        .collect::<Vec<_>>()
+        .join(",");
+    let base = engine
+        .name
+        .split_once(':')
+        .map_or(engine.name.as_str(), |v| v.0);
+    format!("{base}:{options}")
 }
 
 fn resolve_engines(specs: &[String]) -> Result<Vec<EngineConfig>, String> {
