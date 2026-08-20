@@ -5,12 +5,21 @@ use bkgm::Variant;
 use bkgm::dice_gen::FastrandDice;
 use tokio::sync::mpsc;
 use tokio::task;
+use tokio::task::JoinHandle;
 
 use crate::config::ResolvedEngine;
-use crate::duel_game::{play_game, seed_for_game};
-use crate::duel_messages::{CompletedGame, WorkerMessage};
+use crate::duel_game::{DuelGameResult, play_game, seed_for_game};
 use crate::engine::EngineProcess;
 
+pub(crate) enum WorkerMessage {
+    Game {
+        game_idx: usize,
+        result: DuelGameResult,
+    },
+    Error(String),
+}
+
+#[derive(Clone)]
 pub struct LocalWorkerSpec {
     pub workers: usize,
     pub pairs: usize,
@@ -22,121 +31,80 @@ pub struct LocalWorkerSpec {
     pub cancel: Arc<AtomicBool>,
 }
 
-pub(crate) fn spawn_local_workers(spec: LocalWorkerSpec, tx: mpsc::UnboundedSender<WorkerMessage>) {
+pub(crate) fn spawn_local_workers(
+    spec: LocalWorkerSpec,
+    tx: mpsc::UnboundedSender<WorkerMessage>,
+) -> Vec<JoinHandle<()>> {
     let worker_count = spec.workers;
-    for worker_id in 0..worker_count {
-        let tx = tx.clone();
-        let worker_variant = spec.variant;
-        let engine_a_cfg = spec.engine_a.clone();
-        let engine_b_cfg = spec.engine_b.clone();
-        let cancel = spec.cancel.clone();
-        let max_plies = spec.max_plies;
-        let base_seed = spec.base_seed;
-        let pairs = spec.pairs;
+    (0..worker_count)
+        .map(|worker_id| {
+            let tx = tx.clone();
+            let spec = spec.clone();
 
-        task::spawn_blocking(move || {
-            let mut engine_a = match EngineProcess::spawn(&engine_a_cfg) {
-                Ok(e) => e,
-                Err(err) => {
-                    let _ = tx.send(WorkerMessage::Error(format!(
-                        "worker {} failed to spawn engine A: {}",
-                        worker_id + 1,
-                        err
-                    )));
-                    let _ = tx.send(WorkerMessage::Done);
-                    return;
+            task::spawn_blocking(move || {
+                if let Err(error) = run_worker(worker_id, &spec, &tx) {
+                    report_error(&spec.cancel, &tx, error);
                 }
-            };
-            let mut engine_b = match EngineProcess::spawn(&engine_b_cfg) {
-                Ok(e) => e,
-                Err(err) => {
-                    engine_a.quit();
-                    let _ = tx.send(WorkerMessage::Error(format!(
-                        "worker {} failed to spawn engine B: {}",
-                        worker_id + 1,
-                        err
-                    )));
-                    let _ = tx.send(WorkerMessage::Done);
-                    return;
-                }
-            };
+            })
+        })
+        .collect()
+}
 
-            let init_result = (|| -> Result<(), String> {
-                engine_a.init_ubgi()?;
-                engine_b.init_ubgi()?;
-                engine_a.set_variant(worker_variant)?;
-                engine_b.set_variant(worker_variant)?;
-                Ok(())
-            })();
+fn run_worker(
+    worker_id: usize,
+    spec: &LocalWorkerSpec,
+    tx: &mpsc::UnboundedSender<WorkerMessage>,
+) -> Result<(), String> {
+    let worker = worker_id + 1;
+    let mut engine_a = EngineProcess::spawn(&spec.engine_a)
+        .map_err(|error| format!("worker {worker} failed to spawn engine A: {error}"))?;
+    let mut engine_b = EngineProcess::spawn(&spec.engine_b)
+        .map_err(|error| format!("worker {worker} failed to spawn engine B: {error}"))?;
+    engine_a
+        .init_ubgi()
+        .and_then(|()| engine_b.init_ubgi())
+        .and_then(|()| engine_a.set_variant(spec.variant))
+        .and_then(|()| engine_b.set_variant(spec.variant))
+        .map_err(|error| format!("worker {worker} engine init failed: {error}"))?;
 
-            if let Err(err) = init_result {
-                let _ = tx.send(WorkerMessage::Error(format!(
-                    "worker {} engine init failed: {}",
-                    worker_id + 1,
-                    err
-                )));
-                engine_a.quit();
-                engine_b.quit();
-                let _ = tx.send(WorkerMessage::Done);
-                return;
+    'pairs: for pair_idx in (worker_id..spec.pairs).step_by(spec.workers) {
+        for leg in 0..2 {
+            if spec.cancel.load(Ordering::Relaxed) {
+                break 'pairs;
             }
-
-            for pair_idx in (worker_id..pairs).step_by(worker_count) {
-                if cancel.load(Ordering::Relaxed) {
-                    break;
-                }
-
-                for leg in 0..2 {
-                    let game_idx = pair_idx * 2 + leg;
-                    let a_is_x = leg == 0;
-                    if let Err(err) = engine_a.new_game() {
-                        let _ = tx.send(WorkerMessage::Error(format!(
-                            "worker {} game {} new_game(A) failed: {}",
-                            worker_id + 1,
-                            game_idx + 1,
-                            err
-                        )));
-                        break;
-                    }
-                    if let Err(err) = engine_b.new_game() {
-                        let _ = tx.send(WorkerMessage::Error(format!(
-                            "worker {} game {} new_game(B) failed: {}",
-                            worker_id + 1,
-                            game_idx + 1,
-                            err
-                        )));
-                        break;
-                    }
-
-                    let mut dice_gen = FastrandDice::with_seed(seed_for_game(base_seed, pair_idx));
-                    match play_game(
-                        worker_variant,
-                        max_plies,
-                        &mut dice_gen,
-                        &mut engine_a,
-                        &mut engine_b,
-                        a_is_x,
-                    ) {
-                        Ok(result) => {
-                            let _ =
-                                tx.send(WorkerMessage::Game(CompletedGame { game_idx, result }));
-                        }
-                        Err(err) => {
-                            let _ = tx.send(WorkerMessage::Error(format!(
-                                "worker {} game {} failed: {}",
-                                worker_id + 1,
-                                game_idx + 1,
-                                err
-                            )));
-                            break;
-                        }
-                    }
-                }
-            }
-
-            engine_a.quit();
-            engine_b.quit();
-            let _ = tx.send(WorkerMessage::Done);
-        });
+            let game_idx = pair_idx * 2 + leg;
+            engine_a.new_game().map_err(|error| {
+                format!(
+                    "worker {worker} game {} new_game(A) failed: {error}",
+                    game_idx + 1
+                )
+            })?;
+            engine_b.new_game().map_err(|error| {
+                format!(
+                    "worker {worker} game {} new_game(B) failed: {error}",
+                    game_idx + 1
+                )
+            })?;
+            let mut dice_gen = FastrandDice::with_seed(seed_for_game(spec.base_seed, pair_idx));
+            let result = play_game(
+                spec.variant,
+                spec.max_plies,
+                &mut dice_gen,
+                &mut engine_a,
+                &mut engine_b,
+                leg == 0,
+            )
+            .map_err(|error| format!("worker {worker} game {} failed: {error}", game_idx + 1))?;
+            let _ = tx.send(WorkerMessage::Game { game_idx, result });
+        }
     }
+
+    engine_a.quit();
+    engine_b.quit();
+    Ok(())
+}
+
+fn report_error(cancel: &AtomicBool, tx: &mpsc::UnboundedSender<WorkerMessage>, message: String) {
+    cancel.store(true, Ordering::Relaxed);
+    let _ = tx.send(WorkerMessage::Error(message));
 }

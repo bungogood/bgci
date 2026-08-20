@@ -8,8 +8,8 @@ use tokio::sync::mpsc;
 use tracing::debug;
 
 use crate::config::ResolvedMatchup;
-use crate::duel_messages::{CompletedGame, WorkerMessage};
-use crate::duel_workers::{LocalWorkerSpec, spawn_local_workers};
+use crate::duel_game::DuelGameResult;
+use crate::duel_workers::{LocalWorkerSpec, WorkerMessage, spawn_local_workers};
 use crate::stats::{DuelStats, GameUpdate};
 
 pub struct RunSummary {
@@ -49,7 +49,7 @@ pub async fn run_matchup(cfg: &ResolvedMatchup, variant: Variant) -> Result<Matc
     let (tx, mut rx) = mpsc::unbounded_channel::<WorkerMessage>();
     let cancel = Arc::new(AtomicBool::new(false));
 
-    spawn_local_workers(
+    let handles = spawn_local_workers(
         LocalWorkerSpec {
             workers,
             pairs: cfg.pairs,
@@ -64,33 +64,36 @@ pub async fn run_matchup(cfg: &ResolvedMatchup, variant: Variant) -> Result<Matc
     );
     drop(tx);
 
-    let mut done_workers = 0usize;
     let mut done_games = 0usize;
     let mut run_error: Option<String> = None;
 
-    while done_workers < workers {
-        let msg = rx.recv().await;
-        let msg = match msg {
-            Some(msg) => msg,
-            None => break,
-        };
+    while let Some(msg) = rx.recv().await {
         match msg {
-            WorkerMessage::Done => {
-                done_workers += 1;
-            }
             WorkerMessage::Error(err) => {
                 if run_error.is_none() {
                     run_error = Some(err);
                     cancel.store(true, Ordering::Relaxed);
                 }
             }
-            WorkerMessage::Game(done) => {
+            WorkerMessage::Game { game_idx, result } => {
                 done_games += 1;
                 if run_error.is_none() {
                     games.push(process_completed_game(
-                        &done, cfg, &mut stats, run_start, &ui, done_games,
-                    )?);
+                        game_idx, &result, cfg, &mut stats, run_start, &ui, done_games,
+                    ));
                 }
+            }
+        }
+    }
+
+    for (worker_id, handle) in handles.into_iter().enumerate() {
+        if let Err(err) = handle.await {
+            let join_error = format!("worker {} task failed: {err}", worker_id + 1);
+            if let Some(run_error) = &mut run_error {
+                run_error.push_str("; ");
+                run_error.push_str(&join_error);
+            } else {
+                run_error = Some(join_error);
             }
         }
     }
@@ -98,9 +101,9 @@ pub async fn run_matchup(cfg: &ResolvedMatchup, variant: Variant) -> Result<Matc
     if let Some(err) = run_error {
         return Err(err);
     }
-    if done_workers != workers || done_games != game_count {
+    if done_games != game_count {
         return Err(format!(
-            "duel ended early: completed {done_games}/{game_count} games across {done_workers}/{workers} workers"
+            "duel ended early: completed {done_games}/{game_count} games across {workers} workers"
         ));
     }
 
@@ -168,16 +171,15 @@ impl ProgressUi {
 }
 
 fn process_completed_game(
-    done: &CompletedGame,
+    game_idx: usize,
+    result: &DuelGameResult,
     cfg: &ResolvedMatchup,
     stats: &mut DuelStats,
     run_start: Instant,
     ui: &ProgressUi,
     done_games: usize,
-) -> Result<GameRecord, String> {
-    let game_idx = done.game_idx;
+) -> GameRecord {
     let a_is_x = game_idx % 2 == 0;
-    let result = &done.result;
 
     debug!(
         game = game_idx + 1,
@@ -205,7 +207,7 @@ fn process_completed_game(
     let lines = stats.status_lines(&cfg.engine_a.name, &cfg.engine_b.name, done_games, elapsed);
     ui.update(done_games, &lines);
 
-    Ok(GameRecord {
+    GameRecord {
         game_idx,
         points_a: f64::from(a_game_points),
         plies: result.plies,
@@ -213,5 +215,5 @@ fn process_completed_game(
         b_decisions: result.b_decisions,
         a_decision_time: result.a_decision_time,
         b_decision_time: result.b_decision_time,
-    })
+    }
 }

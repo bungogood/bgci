@@ -3,7 +3,6 @@ pub mod checker;
 pub mod common;
 pub mod config;
 pub mod duel_game;
-pub mod duel_messages;
 pub mod duel_runner;
 pub mod duel_workers;
 pub mod engine;
