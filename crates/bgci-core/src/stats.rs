@@ -1,8 +1,6 @@
 use std::collections::BTreeMap;
 use std::time::Duration;
 
-use crate::report::{StatusView, mean_ci95};
-
 #[derive(Default)]
 pub struct DuelStats {
     a_points: f32,
@@ -96,13 +94,13 @@ impl DuelStats {
         a_game_points
     }
 
-    pub fn status_view<'a>(
+    pub fn status_lines(
         &self,
-        engine_a: &'a str,
-        engine_b: &'a str,
+        engine_a: &str,
+        engine_b: &str,
         games_done: usize,
         elapsed: Duration,
-    ) -> StatusView<'a> {
+    ) -> [String; 6] {
         let elapsed_secs = elapsed.as_secs_f64();
         let games = games_done.max(1);
         let complete_pair_ppg = self
@@ -118,44 +116,103 @@ impl DuelStats {
         } else {
             mean_ci95(pair_sum, pair_sq_sum, complete_pair_ppg.len())
         };
+        let a_avg_ms = if self.a_decisions == 0 {
+            0.0
+        } else {
+            self.a_decision_time.as_secs_f64() * 1000.0 / self.a_decisions as f64
+        };
+        let b_avg_ms = if self.b_decisions == 0 {
+            0.0
+        } else {
+            self.b_decision_time.as_secs_f64() * 1000.0 / self.b_decisions as f64
+        };
 
-        StatusView {
-            engine_a,
-            engine_b,
-            games_done,
-            a_avg_pts,
-            a_avg_ci95,
-            a_win_pct: (self.a_wins as f64 / games as f64) * 100.0,
-            b_win_pct: (self.b_wins as f64 / games as f64) * 100.0,
-            a_gammons: self.a_gammons,
-            b_gammons: self.b_gammons,
-            a_backgammons: self.a_backgammons,
-            b_backgammons: self.b_backgammons,
-            a_normals: self.a_normals,
-            b_normals: self.b_normals,
-            incomplete_count: self.incomplete,
-            a_points_as_x: self.a_points_as_x,
-            a_points_as_o: self.a_points_as_o,
-            b_points_as_x: self.b_points_as_x,
-            b_points_as_o: self.b_points_as_o,
-            a_games_as_x: self.a_games_as_x,
-            a_games_as_o: self.a_games_as_o,
-            b_games_as_x: self.b_games_as_x,
-            b_games_as_o: self.b_games_as_o,
-            a_avg_ms: if self.a_decisions == 0 {
-                0.0
-            } else {
-                self.a_decision_time.as_secs_f64() * 1000.0 / self.a_decisions as f64
-            },
-            b_avg_ms: if self.b_decisions == 0 {
-                0.0
-            } else {
-                self.b_decision_time.as_secs_f64() * 1000.0 / self.b_decisions as f64
-            },
-            games_per_sec: games_done as f64 / elapsed_secs.max(1e-9),
-            avg_ply: self.total_plies as f64 / games as f64,
-            elapsed,
-        }
+        [
+            format!("ENGINES A={engine_a}   B={engine_b}"),
+            format!(
+                " RESULT A vs B {a_avg_pts:+.3} ± {a_avg_ci95:.3} ppg   win {:.1}/{:.1}%   over {games_done} games",
+                ratio_pct(self.a_wins, games),
+                ratio_pct(self.b_wins, games),
+            ),
+            format!(
+                "   RATE {:.2} g/s   avg ply {:.1}   elapsed {}",
+                games_done as f64 / elapsed_secs.max(1e-9),
+                self.total_plies as f64 / games as f64,
+                fmt_duration_short(elapsed),
+            ),
+            format!(" DECIDE A {a_avg_ms:.2} ms/move   B {b_avg_ms:.2} ms/move"),
+            format!(
+                "  CLASS A n/g/bg {}-{}-{} ({:.1}/{:.1}/{:.1}%)   B {}-{}-{} ({:.1}/{:.1}/{:.1}%)   incomplete {} ({:.1}%)",
+                self.a_normals,
+                self.a_gammons,
+                self.a_backgammons,
+                ratio_pct(self.a_normals, games_done),
+                ratio_pct(self.a_gammons, games_done),
+                ratio_pct(self.a_backgammons, games_done),
+                self.b_normals,
+                self.b_gammons,
+                self.b_backgammons,
+                ratio_pct(self.b_normals, games_done),
+                ratio_pct(self.b_gammons, games_done),
+                ratio_pct(self.b_backgammons, games_done),
+                self.incomplete,
+                ratio_pct(self.incomplete, games_done),
+            ),
+            format!(
+                "  SIDES A X:{:+.3} O:{:+.3}   B X:{:+.3} O:{:+.3} ppg",
+                per_game(self.a_points_as_x, self.a_games_as_x),
+                per_game(self.a_points_as_o, self.a_games_as_o),
+                per_game(self.b_points_as_x, self.b_games_as_x),
+                per_game(self.b_points_as_o, self.b_games_as_o),
+            ),
+        ]
+    }
+}
+
+fn mean_ci95(sum: f64, sum_sq: f64, n: usize) -> (f64, f64) {
+    if n == 0 {
+        return (0.0, 0.0);
+    }
+    let mean = sum / n as f64;
+    if n < 2 {
+        return (mean, 0.0);
+    }
+    let variance = ((sum_sq - (sum * sum) / n as f64) / (n as f64 - 1.0)).max(0.0);
+    let se = (variance / n as f64).sqrt();
+    (mean, 1.96 * se)
+}
+
+fn ratio_pct(count: usize, total: usize) -> f64 {
+    if total == 0 {
+        0.0
+    } else {
+        (count as f64 / total as f64) * 100.0
+    }
+}
+
+fn per_game(sum: f32, n: usize) -> f64 {
+    if n == 0 { 0.0 } else { sum as f64 / n as f64 }
+}
+
+fn fmt_duration_short(d: Duration) -> String {
+    let secs = d.as_secs();
+    let millis = d.subsec_millis();
+
+    if secs == 0 {
+        return format!("{millis}ms");
+    }
+    if secs < 60 {
+        return format!("{:.2}s", d.as_secs_f64());
+    }
+
+    let hours = secs / 3600;
+    let minutes = (secs % 3600) / 60;
+    let seconds = secs % 60;
+
+    if hours > 0 {
+        format!("{hours}h {minutes}m")
+    } else {
+        format!("{minutes}m {seconds}s")
     }
 }
 

@@ -136,12 +136,9 @@ pub async fn run(args: DuelArgs) -> Result<(), String> {
         );
     }
     let summary = run.summary;
-    println!("{}", summary.line_engines);
-    println!("{}", summary.line_result);
-    println!("{}", summary.line_rate);
-    println!("{}", summary.line_decide);
-    println!("{}", summary.line_class);
-    println!("{}", summary.line_sides);
+    for line in summary.lines {
+        println!("{line}");
+    }
     if let Some(log_file) = &args.log_file {
         println!("log   -> {}", log_file.display());
     }

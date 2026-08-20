@@ -10,16 +10,10 @@ use tracing::debug;
 use crate::config::ResolvedMatchup;
 use crate::duel_messages::{CompletedGame, WorkerMessage};
 use crate::duel_workers::{LocalWorkerSpec, spawn_local_workers};
-use crate::report::render_status_lines;
 use crate::stats::{DuelStats, GameUpdate};
 
 pub struct RunSummary {
-    pub line_engines: String,
-    pub line_result: String,
-    pub line_rate: String,
-    pub line_decide: String,
-    pub line_class: String,
-    pub line_sides: String,
+    pub lines: [String; 6],
 }
 
 #[derive(Clone, Debug)]
@@ -39,8 +33,6 @@ pub struct MatchupRun {
 }
 
 pub async fn run_matchup(cfg: &ResolvedMatchup, variant: Variant) -> Result<MatchupRun, String> {
-    let engine_a_label = cfg.engine_a.name.clone();
-    let engine_b_label = cfg.engine_b.name.clone();
     let game_count = cfg
         .pairs
         .checked_mul(2)
@@ -115,13 +107,7 @@ pub async fn run_matchup(cfg: &ResolvedMatchup, variant: Variant) -> Result<Matc
     ui.finish();
 
     let elapsed = run_start.elapsed();
-    let (line_engines, line_result, line_rate, line_decide, line_class, line_sides) =
-        render_status_lines(stats.status_view(
-            &engine_a_label,
-            &engine_b_label,
-            game_count,
-            elapsed,
-        ));
+    let lines = stats.status_lines(&cfg.engine_a.name, &cfg.engine_b.name, game_count, elapsed);
 
     games.sort_by_key(|game| game.game_idx);
     for (expected_idx, game) in games.iter().enumerate() {
@@ -133,26 +119,14 @@ pub async fn run_matchup(cfg: &ResolvedMatchup, variant: Variant) -> Result<Matc
         }
     }
     Ok(MatchupRun {
-        summary: RunSummary {
-            line_engines,
-            line_result,
-            line_rate,
-            line_decide,
-            line_class,
-            line_sides,
-        },
+        summary: RunSummary { lines },
         games,
     })
 }
 
 struct ProgressUi {
     progress: ProgressBar,
-    stats_engines: ProgressBar,
-    stats_result: ProgressBar,
-    stats_rate: ProgressBar,
-    stats_decide: ProgressBar,
-    stats_class: ProgressBar,
-    stats_sides: ProgressBar,
+    stats: [ProgressBar; 6],
 }
 
 impl ProgressUi {
@@ -168,48 +142,28 @@ impl ProgressUi {
         );
         progress.set_prefix("   DUEL");
 
-        let stats_engines = mp.add(ProgressBar::new_spinner());
-        stats_engines.set_style(ProgressStyle::with_template("{msg}").map_err(|e| e.to_string())?);
-        let stats_result = mp.add(ProgressBar::new_spinner());
-        stats_result.set_style(ProgressStyle::with_template("{msg}").map_err(|e| e.to_string())?);
-        let stats_rate = mp.add(ProgressBar::new_spinner());
-        stats_rate.set_style(ProgressStyle::with_template("{msg}").map_err(|e| e.to_string())?);
-        let stats_decide = mp.add(ProgressBar::new_spinner());
-        stats_decide.set_style(ProgressStyle::with_template("{msg}").map_err(|e| e.to_string())?);
-        let stats_class = mp.add(ProgressBar::new_spinner());
-        stats_class.set_style(ProgressStyle::with_template("{msg}").map_err(|e| e.to_string())?);
-        let stats_sides = mp.add(ProgressBar::new_spinner());
-        stats_sides.set_style(ProgressStyle::with_template("{msg}").map_err(|e| e.to_string())?);
+        let stats_style = ProgressStyle::with_template("{msg}").map_err(|e| e.to_string())?;
+        let stats = std::array::from_fn(|_| {
+            let bar = mp.add(ProgressBar::new_spinner());
+            bar.set_style(stats_style.clone());
+            bar
+        });
 
-        Ok(Self {
-            progress,
-            stats_engines,
-            stats_result,
-            stats_rate,
-            stats_decide,
-            stats_class,
-            stats_sides,
-        })
+        Ok(Self { progress, stats })
     }
 
-    fn update(&self, done_games: usize, lines: (&str, &str, &str, &str, &str, &str)) {
+    fn update(&self, done_games: usize, lines: &[String; 6]) {
         self.progress.set_position(done_games as u64);
-        self.stats_engines.set_message(lines.0.to_string());
-        self.stats_result.set_message(lines.1.to_string());
-        self.stats_rate.set_message(lines.2.to_string());
-        self.stats_decide.set_message(lines.3.to_string());
-        self.stats_class.set_message(lines.4.to_string());
-        self.stats_sides.set_message(lines.5.to_string());
+        for (bar, line) in self.stats.iter().zip(lines) {
+            bar.set_message(line.clone());
+        }
     }
 
     fn finish(&self) {
         self.progress.finish_and_clear();
-        self.stats_engines.finish_and_clear();
-        self.stats_result.finish_and_clear();
-        self.stats_rate.finish_and_clear();
-        self.stats_decide.finish_and_clear();
-        self.stats_class.finish_and_clear();
-        self.stats_sides.finish_and_clear();
+        for bar in &self.stats {
+            bar.finish_and_clear();
+        }
     }
 }
 
@@ -248,24 +202,8 @@ fn process_completed_game(
     });
 
     let elapsed = run_start.elapsed();
-    let (line_engines, line_result, line_rate, line_decide, line_class, line_sides) =
-        render_status_lines(stats.status_view(
-            &cfg.engine_a.name,
-            &cfg.engine_b.name,
-            done_games,
-            elapsed,
-        ));
-    ui.update(
-        done_games,
-        (
-            &line_engines,
-            &line_result,
-            &line_rate,
-            &line_decide,
-            &line_class,
-            &line_sides,
-        ),
-    );
+    let lines = stats.status_lines(&cfg.engine_a.name, &cfg.engine_b.name, done_games, elapsed);
+    ui.update(done_games, &lines);
 
     Ok(GameRecord {
         game_idx,
