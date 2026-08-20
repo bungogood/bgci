@@ -8,9 +8,9 @@ use rusqlite::{Connection, OptionalExtension, Transaction, params};
 use crate::config::EngineConfig;
 use crate::duel_game::seed_for_game;
 use crate::duel_runner::GameRecord;
-use crate::ranking::RankingGame;
+use crate::ranking::RankingEdge;
 
-const SCHEMA_VERSION: i64 = 1;
+const SCHEMA_VERSION: i64 = 2;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum BenchmarkKind {
@@ -112,7 +112,7 @@ pub struct RankingPool {
 }
 
 pub struct RankingData {
-    pub games: Vec<RankingGame>,
+    pub edges: Vec<RankingEdge>,
     pub pair_counts: Vec<Vec<usize>>,
     pub average_decision_time: Vec<Option<Duration>>,
     pub last_played_batch: Vec<Option<usize>>,
@@ -432,6 +432,19 @@ impl BenchmarkStore {
             .conn
             .transaction()
             .map_err(|e| format!("begin add ranking engines transaction: {e}"))?;
+        let status: String = tx
+            .query_row(
+                "SELECT status FROM benchmarks WHERE id = ? AND kind = 'ranking'",
+                params![pool.id],
+                |row| row.get(0),
+            )
+            .map_err(|e| format!("recheck ranking status: {e}"))?;
+        if status != "paused" {
+            return Err(format!(
+                "ranking '{}' must remain paused while adding engines",
+                pool.name
+            ));
+        }
         for engine in engines {
             add_engine(&tx, pool.id, "member", engine)?;
         }
@@ -534,90 +547,79 @@ impl BenchmarkStore {
             .map(|(index, engine)| (engine.build_id, index))
             .collect::<HashMap<_, _>>();
         let mut pair_counts = vec![vec![0; pool.engines.len()]; pool.engines.len()];
-        let mut pair_stmt = self
+        let mut edge_stmt = self
             .conn
             .prepare(
-                "SELECT m.engine_a_id, m.engine_b_id, COUNT(p.id)
-                 FROM matchups m
-                 JOIN pairs p ON p.matchup_id = m.id AND p.status = 'completed'
-                 WHERE m.benchmark_id = ?
-                 GROUP BY m.engine_a_id, m.engine_b_id",
+                "SELECT engine_lo_id, engine_hi_id, completed_pairs, rated_games,
+                        score_sum_lo, sum_m_squared, sum_m_score, sum_score_squared
+                 FROM ranking_edge_stats
+                 WHERE benchmark_id = ?
+                 ORDER BY engine_lo_id, engine_hi_id",
             )
-            .map_err(|e| format!("prepare ranking pair counts: {e}"))?;
-        let pair_rows = pair_stmt
+            .map_err(|e| format!("prepare ranking edges: {e}"))?;
+        let edge_rows = edge_stmt
             .query_map(params![pool.id], |row| {
                 Ok((
                     row.get::<_, i64>(0)?,
                     row.get::<_, i64>(1)?,
                     row.get::<_, i64>(2)?,
+                    row.get::<_, i64>(3)?,
+                    row.get::<_, f64>(4)?,
+                    row.get::<_, f64>(5)?,
+                    row.get::<_, f64>(6)?,
+                    row.get::<_, f64>(7)?,
                 ))
             })
-            .map_err(|e| format!("query ranking pair counts: {e}"))?;
-        for row in pair_rows {
-            let (a_id, b_id, count) = row.map_err(|e| format!("read pair count: {e}"))?;
-            if let (Some(&a), Some(&b)) = (index_by_build.get(&a_id), index_by_build.get(&b_id)) {
-                pair_counts[a][b] += count as usize;
-                pair_counts[b][a] += count as usize;
+            .map_err(|e| format!("query ranking edges: {e}"))?;
+        let mut edges = Vec::new();
+        for row in edge_rows {
+            let (lo_id, hi_id, pairs, games, score, m2, m_score, score2) =
+                row.map_err(|e| format!("read ranking edge: {e}"))?;
+            if let (Some(&lo), Some(&hi)) = (index_by_build.get(&lo_id), index_by_build.get(&hi_id))
+            {
+                pair_counts[lo][hi] = pairs as usize;
+                pair_counts[hi][lo] = pairs as usize;
+                edges.push(RankingEdge {
+                    engine_a: lo,
+                    engine_b: hi,
+                    completed_pairs: pairs as usize,
+                    rated_games: games as usize,
+                    score_sum_a: score,
+                    sum_m_squared: m2,
+                    sum_m_score: m_score,
+                    sum_score_squared: score2,
+                });
             }
         }
 
-        let mut game_stmt = self
+        let mut engine_stmt = self
             .conn
             .prepare(
-                "SELECT m.engine_a_id, m.engine_b_id, g.winner_id, g.points_a,
-                        g.decisions_a, g.decisions_b,
-                        g.decision_seconds_a, g.decision_seconds_b, m.batch_index
-                  FROM games g
-                  JOIN pairs p ON p.id = g.pair_id
-                  JOIN matchups m ON m.id = p.matchup_id
-                  WHERE m.benchmark_id = ?",
+                "SELECT engine_id, decision_count, decision_seconds, last_played_batch
+                 FROM ranking_engine_stats
+                 WHERE benchmark_id = ?",
             )
-            .map_err(|e| format!("prepare ranking games: {e}"))?;
-        let game_rows = game_stmt
+            .map_err(|e| format!("prepare ranking engine stats: {e}"))?;
+        let engine_rows = engine_stmt
             .query_map(params![pool.id], |row| {
                 Ok((
                     row.get::<_, i64>(0)?,
                     row.get::<_, i64>(1)?,
-                    row.get::<_, Option<i64>>(2)?,
-                    row.get::<_, f64>(3)?,
-                    row.get::<_, i64>(4)?,
-                    row.get::<_, i64>(5)?,
-                    row.get::<_, f64>(6)?,
-                    row.get::<_, f64>(7)?,
-                    row.get::<_, i64>(8)?,
+                    row.get::<_, f64>(2)?,
+                    row.get::<_, Option<i64>>(3)?,
                 ))
             })
-            .map_err(|e| format!("query ranking games: {e}"))?;
-        let mut games = Vec::new();
+            .map_err(|e| format!("query ranking engine stats: {e}"))?;
         let mut decision_counts = vec![0_usize; pool.engines.len()];
         let mut decision_seconds = vec![0.0_f64; pool.engines.len()];
         let mut last_played_batch = vec![None; pool.engines.len()];
-        for row in game_rows {
-            let (
-                a_id,
-                b_id,
-                winner_id,
-                points_a,
-                a_decisions,
-                b_decisions,
-                a_seconds,
-                b_seconds,
-                batch,
-            ) = row.map_err(|e| format!("read ranking game: {e}"))?;
-            if let (Some(&a), Some(&b)) = (index_by_build.get(&a_id), index_by_build.get(&b_id)) {
-                decision_counts[a] += a_decisions as usize;
-                decision_counts[b] += b_decisions as usize;
-                decision_seconds[a] += a_seconds;
-                decision_seconds[b] += b_seconds;
-                last_played_batch[a] = Some(last_played_batch[a].unwrap_or(0).max(batch as usize));
-                last_played_batch[b] = Some(last_played_batch[b].unwrap_or(0).max(batch as usize));
-                if winner_id.is_some() {
-                    games.push(RankingGame {
-                        engine_a: a,
-                        engine_b: b,
-                        a_score: 0.5 + points_a / 6.0,
-                    });
-                }
+        for row in engine_rows {
+            let (build_id, decisions, seconds, batch) =
+                row.map_err(|e| format!("read ranking engine stats: {e}"))?;
+            if let Some(&index) = index_by_build.get(&build_id) {
+                decision_counts[index] = decisions as usize;
+                decision_seconds[index] = seconds;
+                last_played_batch[index] = batch.map(|value| value as usize);
             }
         }
         let average_decision_time = decision_seconds
@@ -628,7 +630,7 @@ impl BenchmarkStore {
             })
             .collect();
         Ok(RankingData {
-            games,
+            edges,
             pair_counts,
             average_decision_time,
             last_played_batch,
@@ -710,6 +712,8 @@ impl BenchmarkStore {
                 params![pair_id],
             )
             .map_err(|e| format!("complete pair: {e}"))?;
+
+            update_ranking_pair_projection(&tx, matchup, pair_games)?;
         }
         tx.commit().map_err(|e| format!("commit results: {e}"))
     }
@@ -782,6 +786,38 @@ impl BenchmarkStore {
             .map_err(|e| format!("query benchmark list: {e}"))?;
         rows.collect::<Result<Vec<_>, _>>()
             .map_err(|e| format!("read benchmark list: {e}"))
+    }
+
+    pub fn list_rankings(&self) -> Result<Vec<BenchmarkSummary>, String> {
+        let mut stmt = self
+            .conn
+            .prepare(
+                "SELECT b.id, b.name, b.kind, b.status, b.variant, b.requested_pairs,
+                        COALESCE(SUM(e.completed_pairs), 0),
+                        COALESCE(SUM(e.rated_games), 0)
+                 FROM benchmarks b
+                 LEFT JOIN ranking_edge_stats e ON e.benchmark_id = b.id
+                 WHERE b.kind = 'ranking'
+                 GROUP BY b.id
+                 ORDER BY b.id DESC",
+            )
+            .map_err(|e| format!("prepare ranking list: {e}"))?;
+        let rows = stmt
+            .query_map([], |row| {
+                Ok(BenchmarkSummary {
+                    id: row.get(0)?,
+                    name: row.get(1)?,
+                    kind: row.get(2)?,
+                    status: row.get(3)?,
+                    variant: row.get(4)?,
+                    requested_pairs: row.get::<_, i64>(5)? as usize,
+                    completed_pairs: row.get::<_, i64>(6)? as usize,
+                    games: row.get::<_, i64>(7)? as usize,
+                })
+            })
+            .map_err(|e| format!("query ranking list: {e}"))?;
+        rows.collect::<Result<Vec<_>, _>>()
+            .map_err(|e| format!("read ranking list: {e}"))
     }
 
     pub fn get(&self, id: i64) -> Result<Option<BenchmarkSummary>, String> {
@@ -1000,6 +1036,91 @@ fn validate_games(matchup: MatchupHandle, games: &[GameRecord]) -> Result<(), St
     Ok(())
 }
 
+fn update_ranking_pair_projection(
+    tx: &Transaction<'_>,
+    matchup: MatchupHandle,
+    games: &[GameRecord],
+) -> Result<(), String> {
+    let (engine_lo_id, engine_hi_id, lo_is_a) = if matchup.engine_a_id < matchup.engine_b_id {
+        (matchup.engine_a_id, matchup.engine_b_id, true)
+    } else {
+        (matchup.engine_b_id, matchup.engine_a_id, false)
+    };
+    let mut decisive_games = 0_i64;
+    let mut score_sum_lo = 0.0;
+    let mut decisions_a = 0_i64;
+    let mut decisions_b = 0_i64;
+    let mut seconds_a = 0.0;
+    let mut seconds_b = 0.0;
+    for game in games {
+        if game.winner_a.is_some() {
+            decisive_games += 1;
+            let lo_points = if lo_is_a {
+                game.points_a
+            } else {
+                game.points_b
+            };
+            score_sum_lo += 0.5 + lo_points / 6.0;
+        }
+        decisions_a += game.a_decisions as i64;
+        decisions_b += game.b_decisions as i64;
+        seconds_a += game.a_decision_time.as_secs_f64();
+        seconds_b += game.b_decision_time.as_secs_f64();
+    }
+    let m = decisive_games as f64;
+
+    tx.execute(
+        "INSERT INTO ranking_edge_stats(
+             benchmark_id, engine_lo_id, engine_hi_id, completed_pairs, rated_games,
+             score_sum_lo, sum_m_squared, sum_m_score, sum_score_squared
+         )
+         SELECT m.benchmark_id, ?, ?, 1, ?, ?, ?, ?, ?
+         FROM matchups m
+         JOIN benchmarks b ON b.id = m.benchmark_id
+         WHERE m.id = ? AND b.kind = 'ranking'
+         ON CONFLICT(benchmark_id, engine_lo_id, engine_hi_id) DO UPDATE SET
+           completed_pairs = completed_pairs + excluded.completed_pairs,
+           rated_games = rated_games + excluded.rated_games,
+           score_sum_lo = score_sum_lo + excluded.score_sum_lo,
+           sum_m_squared = sum_m_squared + excluded.sum_m_squared,
+           sum_m_score = sum_m_score + excluded.sum_m_score,
+           sum_score_squared = sum_score_squared + excluded.sum_score_squared",
+        params![
+            engine_lo_id,
+            engine_hi_id,
+            decisive_games,
+            score_sum_lo,
+            m * m,
+            m * score_sum_lo,
+            score_sum_lo * score_sum_lo,
+            matchup.id,
+        ],
+    )
+    .map_err(|e| format!("update ranking edge projection: {e}"))?;
+
+    for (engine_id, decisions, seconds) in [
+        (matchup.engine_a_id, decisions_a, seconds_a),
+        (matchup.engine_b_id, decisions_b, seconds_b),
+    ] {
+        tx.execute(
+            "INSERT INTO ranking_engine_stats(
+                 benchmark_id, engine_id, decision_count, decision_seconds, last_played_batch
+             )
+             SELECT m.benchmark_id, ?, ?, ?, m.batch_index
+             FROM matchups m
+             JOIN benchmarks b ON b.id = m.benchmark_id
+             WHERE m.id = ? AND b.kind = 'ranking'
+             ON CONFLICT(benchmark_id, engine_id) DO UPDATE SET
+               decision_count = decision_count + excluded.decision_count,
+               decision_seconds = decision_seconds + excluded.decision_seconds,
+               last_played_batch = MAX(last_played_batch, excluded.last_played_batch)",
+            params![engine_id, decisions, seconds, matchup.id],
+        )
+        .map_err(|e| format!("update ranking engine projection: {e}"))?;
+    }
+    Ok(())
+}
+
 fn migrate(conn: &Connection) -> Result<(), String> {
     let version: i64 = conn
         .query_row("PRAGMA user_version", [], |row| row.get(0))
@@ -1064,7 +1185,7 @@ fn migrate(conn: &Connection) -> Result<(), String> {
                status TEXT NOT NULL CHECK(status IN ('running', 'completed', 'incomplete')),
                UNIQUE(matchup_id, pair_index)
              );
-             CREATE TABLE games (
+              CREATE TABLE games (
                id INTEGER PRIMARY KEY,
                pair_id INTEGER NOT NULL REFERENCES pairs(id),
                leg INTEGER NOT NULL CHECK(leg IN (0, 1)),
@@ -1084,14 +1205,129 @@ fn migrate(conn: &Connection) -> Result<(), String> {
                decision_seconds_b REAL NOT NULL CHECK(decision_seconds_b >= 0),
                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
                UNIQUE(pair_id, leg),
-               UNIQUE(pair_id, game_index)
-             );
-             PRAGMA user_version = 1;
-             COMMIT;",
+                UNIQUE(pair_id, game_index)
+              );
+              CREATE TABLE ranking_edge_stats (
+                benchmark_id INTEGER NOT NULL REFERENCES benchmarks(id),
+                engine_lo_id INTEGER NOT NULL REFERENCES engine_builds(id),
+                engine_hi_id INTEGER NOT NULL REFERENCES engine_builds(id),
+                completed_pairs INTEGER NOT NULL CHECK(completed_pairs >= 0),
+                rated_games INTEGER NOT NULL CHECK(rated_games >= 0),
+                score_sum_lo REAL NOT NULL,
+                sum_m_squared REAL NOT NULL,
+                sum_m_score REAL NOT NULL,
+                sum_score_squared REAL NOT NULL,
+                PRIMARY KEY(benchmark_id, engine_lo_id, engine_hi_id),
+                CHECK(engine_lo_id < engine_hi_id)
+              );
+              CREATE TABLE ranking_engine_stats (
+                benchmark_id INTEGER NOT NULL REFERENCES benchmarks(id),
+                engine_id INTEGER NOT NULL REFERENCES engine_builds(id),
+                decision_count INTEGER NOT NULL CHECK(decision_count >= 0),
+                decision_seconds REAL NOT NULL CHECK(decision_seconds >= 0),
+                last_played_batch INTEGER,
+                PRIMARY KEY(benchmark_id, engine_id)
+              );
+              PRAGMA user_version = 2;
+              COMMIT;",
         )
-        .map_err(|e| format!("apply benchmark schema v1: {e}"))?;
+        .map_err(|e| format!("apply benchmark schema v2: {e}"))?;
+    } else if version == 1 {
+        let tx = conn
+            .unchecked_transaction()
+            .map_err(|e| format!("begin benchmark schema v2 migration: {e}"))?;
+        tx.execute_batch(
+            "CREATE TABLE ranking_edge_stats (
+               benchmark_id INTEGER NOT NULL REFERENCES benchmarks(id),
+               engine_lo_id INTEGER NOT NULL REFERENCES engine_builds(id),
+               engine_hi_id INTEGER NOT NULL REFERENCES engine_builds(id),
+               completed_pairs INTEGER NOT NULL CHECK(completed_pairs >= 0),
+               rated_games INTEGER NOT NULL CHECK(rated_games >= 0),
+               score_sum_lo REAL NOT NULL,
+               sum_m_squared REAL NOT NULL,
+               sum_m_score REAL NOT NULL,
+               sum_score_squared REAL NOT NULL,
+               PRIMARY KEY(benchmark_id, engine_lo_id, engine_hi_id),
+               CHECK(engine_lo_id < engine_hi_id)
+             );
+             CREATE TABLE ranking_engine_stats (
+               benchmark_id INTEGER NOT NULL REFERENCES benchmarks(id),
+               engine_id INTEGER NOT NULL REFERENCES engine_builds(id),
+               decision_count INTEGER NOT NULL CHECK(decision_count >= 0),
+               decision_seconds REAL NOT NULL CHECK(decision_seconds >= 0),
+               last_played_batch INTEGER,
+               PRIMARY KEY(benchmark_id, engine_id)
+             );",
+        )
+        .map_err(|e| format!("create benchmark schema v2 projections: {e}"))?;
+        rebuild_ranking_projections(&tx)?;
+        tx.pragma_update(None, "user_version", SCHEMA_VERSION)
+            .map_err(|e| format!("set benchmark schema version: {e}"))?;
+        tx.commit()
+            .map_err(|e| format!("commit benchmark schema v2 migration: {e}"))?;
     }
     Ok(())
+}
+
+fn rebuild_ranking_projections(tx: &Transaction<'_>) -> Result<(), String> {
+    tx.execute_batch(
+        "DELETE FROM ranking_edge_stats;
+         DELETE FROM ranking_engine_stats;
+         WITH pair_stats AS (
+           SELECT m.benchmark_id,
+                  MIN(m.engine_a_id, m.engine_b_id) AS engine_lo_id,
+                  MAX(m.engine_a_id, m.engine_b_id) AS engine_hi_id,
+                  p.id AS pair_id,
+                  SUM(CASE WHEN g.winner_id IS NOT NULL THEN 1 ELSE 0 END) AS decisive_games,
+                  SUM(CASE WHEN g.winner_id IS NOT NULL THEN
+                    0.5 + CASE WHEN m.engine_a_id < m.engine_b_id
+                      THEN g.points_a ELSE g.points_b END / 6.0
+                    ELSE 0.0 END) AS score_sum_lo
+           FROM benchmarks b
+           JOIN matchups m ON m.benchmark_id = b.id
+           JOIN pairs p ON p.matchup_id = m.id AND p.status = 'completed'
+           LEFT JOIN games g ON g.pair_id = p.id
+           WHERE b.kind = 'ranking'
+           GROUP BY m.benchmark_id, engine_lo_id, engine_hi_id, p.id
+         )
+         INSERT INTO ranking_edge_stats(
+           benchmark_id, engine_lo_id, engine_hi_id, completed_pairs, rated_games,
+           score_sum_lo, sum_m_squared, sum_m_score, sum_score_squared
+         )
+         SELECT benchmark_id, engine_lo_id, engine_hi_id, COUNT(*),
+                SUM(decisive_games), SUM(score_sum_lo),
+                SUM(decisive_games * decisive_games),
+                SUM(decisive_games * score_sum_lo),
+                SUM(score_sum_lo * score_sum_lo)
+         FROM pair_stats
+         GROUP BY benchmark_id, engine_lo_id, engine_hi_id;
+
+         WITH engine_games AS (
+           SELECT m.benchmark_id, m.engine_a_id AS engine_id,
+                  g.decisions_a AS decisions, g.decision_seconds_a AS seconds,
+                  m.batch_index
+           FROM benchmarks b
+           JOIN matchups m ON m.benchmark_id = b.id
+           JOIN pairs p ON p.matchup_id = m.id AND p.status = 'completed'
+           JOIN games g ON g.pair_id = p.id
+           WHERE b.kind = 'ranking'
+           UNION ALL
+           SELECT m.benchmark_id, m.engine_b_id,
+                  g.decisions_b, g.decision_seconds_b, m.batch_index
+           FROM benchmarks b
+           JOIN matchups m ON m.benchmark_id = b.id
+           JOIN pairs p ON p.matchup_id = m.id AND p.status = 'completed'
+           JOIN games g ON g.pair_id = p.id
+           WHERE b.kind = 'ranking'
+         )
+         INSERT INTO ranking_engine_stats(
+           benchmark_id, engine_id, decision_count, decision_seconds, last_played_batch
+         )
+         SELECT benchmark_id, engine_id, SUM(decisions), SUM(seconds), MAX(batch_index)
+         FROM engine_games
+         GROUP BY benchmark_id, engine_id;",
+    )
+    .map_err(|e| format!("rebuild ranking projections: {e}"))
 }
 
 pub fn default_benchmark_db_path() -> PathBuf {
@@ -1312,12 +1548,9 @@ mod tests {
         pool.next_batch += 1;
         let data = store.ranking_data(&pool).unwrap();
 
-        assert_eq!(data.games.len(), 2);
-        assert!(
-            data.games
-                .iter()
-                .all(|game| (game.a_score - 2.0 / 3.0).abs() < 1e-12)
-        );
+        assert_eq!(data.edges.len(), 1);
+        assert_eq!(data.edges[0].rated_games, 2);
+        assert!((data.edges[0].score_sum_a - 4.0 / 3.0).abs() < 1e-12);
         assert_eq!(data.pair_counts[0][1], 1);
         assert_eq!(
             data.average_decision_time,
@@ -1367,5 +1600,127 @@ mod tests {
         let retry_pool = store.load_ranking(pool.id).unwrap();
         assert_eq!(retry_pool.next_batch, 0);
         assert!(store.start_ranking_batch(&retry_pool, 0, 1, 1).is_ok());
+    }
+
+    fn ranking_pool(store: &mut BenchmarkStore) -> RankingPool {
+        let pool = store
+            .start_ranking(
+                RankingSpec {
+                    name: "projection-ranking",
+                    variant: "backgammon",
+                    seed: 42,
+                    max_plies: 512,
+                    placement_opponents: 1,
+                    placement_pairs: 1,
+                    established_rd: 80.0,
+                },
+                &[config("a"), config("b")],
+            )
+            .unwrap();
+        store.resume_ranking(pool.id).unwrap();
+        store.load_ranking(pool.id).unwrap()
+    }
+
+    #[test]
+    fn ranking_projections_are_canonical_and_pair_robust() {
+        let mut store =
+            BenchmarkStore::from_connection(Connection::open_in_memory().unwrap()).unwrap();
+        let pool = ranking_pool(&mut store);
+        let matchup = store.start_ranking_batch(&pool, 1, 0, 2).unwrap();
+        store
+            .record_games(
+                matchup,
+                &[game(0, true), game(1, false), game(2, true), game(3, false)],
+            )
+            .unwrap();
+
+        let data = store.ranking_data(&pool).unwrap();
+        let edge = &data.edges[0];
+        assert_eq!((edge.engine_a, edge.engine_b), (0, 1));
+        assert_eq!(edge.completed_pairs, 2);
+        assert_eq!(edge.rated_games, 4);
+        assert!((edge.score_sum_a - 4.0 / 3.0).abs() < 1e-12);
+        assert!((edge.sum_m_squared - 8.0).abs() < 1e-12);
+        assert!((edge.sum_m_score - 8.0 / 3.0).abs() < 1e-12);
+        assert!((edge.sum_score_squared - 8.0 / 9.0).abs() < 1e-12);
+        assert_eq!(data.pair_counts, vec![vec![0, 2], vec![2, 0]]);
+        assert_eq!(
+            data.average_decision_time,
+            vec![
+                Some(Duration::from_millis(20)),
+                Some(Duration::from_millis(10))
+            ]
+        );
+        assert_eq!(data.last_played_batch, vec![Some(0), Some(0)]);
+    }
+
+    #[test]
+    fn projection_failure_rolls_back_raw_results() {
+        let mut store =
+            BenchmarkStore::from_connection(Connection::open_in_memory().unwrap()).unwrap();
+        let pool = ranking_pool(&mut store);
+        let matchup = store.start_ranking_batch(&pool, 0, 1, 1).unwrap();
+        store
+            .conn
+            .execute_batch(
+                "CREATE TRIGGER reject_ranking_projection
+                 BEFORE INSERT ON ranking_edge_stats
+                 BEGIN SELECT RAISE(ABORT, 'projection rejected'); END;",
+            )
+            .unwrap();
+
+        assert!(
+            store
+                .record_games(matchup, &[game(0, true), game(1, false)])
+                .is_err()
+        );
+        let pair_count: i64 = store
+            .conn
+            .query_row("SELECT COUNT(*) FROM pairs", [], |row| row.get(0))
+            .unwrap();
+        let game_count: i64 = store
+            .conn
+            .query_row("SELECT COUNT(*) FROM games", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!((pair_count, game_count), (0, 0));
+    }
+
+    #[test]
+    fn schema_v1_migration_backfills_ranking_projections() {
+        let conn = Connection::open_in_memory().unwrap();
+        let mut store = BenchmarkStore::from_connection(conn).unwrap();
+        let pool = ranking_pool(&mut store);
+        let matchup = store.start_ranking_batch(&pool, 1, 0, 1).unwrap();
+        store
+            .record_games(matchup, &[game(0, true), game(1, false)])
+            .unwrap();
+        store
+            .conn
+            .execute_batch(
+                "DROP TABLE ranking_edge_stats;
+                 DROP TABLE ranking_engine_stats;
+                 PRAGMA user_version = 1;",
+            )
+            .unwrap();
+
+        let store = BenchmarkStore::from_connection(store.conn).unwrap();
+        let data = store.ranking_data(&pool).unwrap();
+        assert_eq!(data.edges.len(), 1);
+        assert_eq!(data.edges[0].completed_pairs, 1);
+        assert_eq!(data.edges[0].rated_games, 2);
+        assert!((data.edges[0].score_sum_a - 2.0 / 3.0).abs() < 1e-12);
+        assert!((data.edges[0].sum_m_squared - 4.0).abs() < 1e-12);
+        assert_eq!(
+            data.average_decision_time,
+            vec![
+                Some(Duration::from_millis(20)),
+                Some(Duration::from_millis(10))
+            ]
+        );
+        let version: i64 = store
+            .conn
+            .query_row("PRAGMA user_version", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(version, SCHEMA_VERSION);
     }
 }

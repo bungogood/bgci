@@ -82,9 +82,10 @@ bgci rank run main --parallel 8
 
 The scheduler first places each provisional engine against a configurable
 number of distinct opponents. It then selects matchups by expected information
-using current rating uncertainty, predicted win probability, and measured move
-time. Runtime cost uses a square-root penalty so cheap engines improve throughput
-without crowding higher-uncertainty engines out of the schedule. An engine that
+using current rating uncertainty, predicted normalized score, and measured move
+time. Engines averaging up to 50 ms per move have equal scheduling cost; above
+that threshold, a square-root runtime penalty makes genuinely slow models play
+less without letting cheap engines crowd out higher-uncertainty engines. An engine that
 has sat out 20 batches is forced back into consideration, so very slow models
 play less often after placement but are never permanently starved. An engine is
 shown as established only after placement and after its approximate RD falls
@@ -98,7 +99,22 @@ connections to three opponents, not 20 pairs against every engine in the pool.
 The model is Bradley-Terry Elo over normalized game points. A game's points are
 mapped from `[-3, +3]` to a score in `[0, 1]`, so gammons and backgammons affect
 the rating direction and negative PPG cannot be treated as a winning result.
-Reported RD is an approximate diagonal uncertainty estimate.
+Reported RD comes from full pool-relative covariance calibrated with mirrored
+pairs as score clusters and finite-sample shrinkage toward model information.
+The `tier` column groups engines from a common tier leader whose
+rating-difference interval still overlaps at the working 95% level.
+
+Raw games remain authoritative, while transactionally maintained per-matchup
+and per-engine projections make routine fitting independent of total game
+count. Existing schema-v1 databases are backfilled automatically. Inspect
+descriptive model residuals and graph cycle coverage with:
+
+```bash
+bgci rank show main --diagnostics
+```
+
+These diagnostics are not significance tests; bootstrap calibration remains
+required before claiming a matchup is genuinely non-transitive.
 
 The default database is:
 

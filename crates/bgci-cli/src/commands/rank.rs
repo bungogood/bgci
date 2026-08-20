@@ -7,7 +7,9 @@ use bgci_core::common::parse_variant;
 use bgci_core::config::{EngineConfig, MatchupConfig};
 use bgci_core::duel_runner::run_matchup;
 use bgci_core::engine::resolve_engine;
-use bgci_core::ranking::{fit_ratings, is_provisional, select_pair_for_pool};
+use bgci_core::ranking::{
+    fit_rating_model, is_provisional, select_pair_for_model, transitivity_diagnostics,
+};
 use clap::{Args, Subcommand};
 
 #[derive(Debug, Args)]
@@ -95,6 +97,10 @@ struct PoolArgs {
     /// Ranking pool name.
     #[arg(default_value = "main")]
     name: String,
+
+    /// Show descriptive observed-versus-model matchup diagnostics.
+    #[arg(long)]
+    diagnostics: bool,
 }
 
 #[derive(Debug, Clone, Args)]
@@ -138,7 +144,7 @@ pub async fn run(args: RankArgs) -> Result<(), String> {
                 &engines,
             )?;
             println!("ranking '{}' created -> {}", pool.name, db_path.display());
-            show_ranking(&store, &pool)
+            show_ranking(&store, &pool, false)
         }
         RankCommand::Run(args) => {
             validate_session(&args.session)?;
@@ -156,18 +162,14 @@ pub async fn run(args: RankArgs) -> Result<(), String> {
                 engines.len(),
                 pool.name
             );
-            show_ranking(&store, &pool)
+            show_ranking(&store, &pool, false)
         }
         RankCommand::Show(args) => {
             let pool = store.load_ranking_by_name(&args.name)?;
-            show_ranking(&store, &pool)
+            show_ranking(&store, &pool, args.diagnostics)
         }
         RankCommand::List => {
-            let rankings = store
-                .list()?
-                .into_iter()
-                .filter(|row| row.kind == "ranking")
-                .collect::<Vec<_>>();
+            let rankings = store.list_rankings()?;
             if rankings.is_empty() {
                 println!("no ranking pools");
             } else {
@@ -219,9 +221,9 @@ async fn run_pool(
             Ok(data) => data,
             Err(error) => break pause(store, &pool.name, pool.id, Some(error)),
         };
-        let ratings = fit_ratings(pool.engines.len(), &data.games);
-        let Some((engine_a, engine_b)) = select_pair_for_pool(
-            &ratings,
+        let model = fit_rating_model(pool.engines.len(), &data.edges);
+        let Some((engine_a, engine_b)) = select_pair_for_model(
+            &model,
             &data.pair_counts,
             &data.average_decision_time,
             &data.last_played_batch,
@@ -270,7 +272,7 @@ async fn run_pool(
         }
         pool.next_batch += 1;
         session_pairs += batch_pairs;
-        if let Err(error) = show_ranking(store, &pool) {
+        if let Err(error) = show_ranking(store, &pool, false) {
             break pause(store, &pool.name, pool.id, Some(error));
         }
     };
@@ -278,14 +280,33 @@ async fn run_pool(
     result
 }
 
-fn show_ranking(store: &BenchmarkStore, pool: &RankingPool) -> Result<(), String> {
+fn show_ranking(
+    store: &BenchmarkStore,
+    pool: &RankingPool,
+    diagnostics: bool,
+) -> Result<(), String> {
     let data = store.ranking_data(pool)?;
-    let mut ratings = fit_ratings(pool.engines.len(), &data.games);
+    let model = fit_rating_model(pool.engines.len(), &data.edges);
+    let mut ratings = model.ratings.clone();
     ratings.sort_by(|a, b| b.elo.total_cmp(&a.elo));
+    let mut tiers = Vec::with_capacity(ratings.len());
+    let mut tier = 1usize;
+    let mut tier_leader = ratings.first();
+    for rating in &ratings {
+        if let Some(leader) = tier_leader
+            && leader.index != rating.index
+            && leader.elo - rating.elo
+                > 1.96 * model.contrast_variance(leader.index, rating.index).sqrt()
+        {
+            tier += 1;
+            tier_leader = Some(rating);
+        }
+        tiers.push(tier);
+    }
     println!();
     println!("ranking '{}' [{}]", pool.name, pool.status);
     println!(
-        " rank  status       family             engine                         rating     rd  move ms   games  pairs"
+        " rank  tier  status       family             engine                         rating     rd  move ms   games  pairs"
     );
     for (rank, rating) in ratings.iter().enumerate() {
         let engine = &pool.engines[rating.index];
@@ -305,8 +326,9 @@ fn show_ranking(store: &BenchmarkStore, pool: &RankingPool) -> Result<(), String
             .map(|duration| format!("{:.2}", duration.as_secs_f64() * 1_000.0))
             .unwrap_or_else(|| "-".to_string());
         println!(
-            "{:>5}  {:<11}  {:<18}  {:<29}  {:>7.1}  {:>5.1}  {:>7}  {:>6}  {:>5}",
+            "{:>5}  {:>4}  {:<11}  {:<18}  {:<29}  {:>7.1}  {:>5.1}  {:>7}  {:>6}  {:>5}",
             rank + 1,
+            tiers[rank],
             status,
             engine.family.as_deref().unwrap_or("-"),
             engine.name,
@@ -316,6 +338,36 @@ fn show_ranking(store: &BenchmarkStore, pool: &RankingPool) -> Result<(), String
             rating.games,
             pairs
         );
+    }
+    if diagnostics {
+        let diagnostics = transitivity_diagnostics(&model, &data.edges, 30);
+        println!();
+        println!(
+            "transitivity diagnostics: {}/{} sampled edges, {} component(s), {} cycle degree(s)",
+            diagnostics.observed_edges,
+            diagnostics.possible_edges,
+            diagnostics.connected_components,
+            diagnostics.cycle_degrees
+        );
+        if diagnostics.cycle_degrees == 0 {
+            println!("  insufficient sampled cycles to assess non-transitivity");
+        } else {
+            println!("  largest descriptive BT residuals (not significance tests)");
+            println!(
+                "  matchup                                            pairs  observed  expected  residual"
+            );
+            for residual in diagnostics.residuals.iter().take(10) {
+                println!(
+                    "  {:<23} vs {:<23} {:>5}   {:>7.3}   {:>7.3}  {:+7.3} PPG",
+                    pool.engines[residual.engine_a].name,
+                    pool.engines[residual.engine_b].name,
+                    residual.pairs,
+                    residual.observed_score,
+                    residual.expected_score,
+                    residual.residual_ppg,
+                );
+            }
+        }
     }
     println!();
     Ok(())

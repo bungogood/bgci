@@ -121,11 +121,18 @@ Implemented:
 6. Reported uncertainty is calculated from completed mirror-pair scores.
 7. Adaptive ranking pools support coverage-first scheduling, information-guided
    batches, continuous execution, and pause/resume from SQLite.
+8. Ranking projections incrementally aggregate normalized point scores and
+   mirrored-pair covariance moments while retaining raw games as authority.
+9. Ranking RD uses centered full covariance with finite-sample shrinkage toward
+   model information and mirrored pairs as robust score clusters; descriptive
+   edge residuals expose possible non-transitivity.
 
 Next:
 
 1. Add executable/model fingerprints when engine identities stabilize.
 2. Persist accepted pairs incrementally and support resume/verification.
-3. Extend rankings with explicitly compatible cross-pool history when needed.
-4. Validate sequential stopping before introducing SPRT.
-5. Add durable or remote workers only after ingestion is idempotent.
+3. Add bootstrap calibration and confirmation scheduling for transitivity
+   diagnostics.
+4. Extend rankings with explicitly compatible cross-pool history when needed.
+5. Validate sequential stopping before introducing SPRT.
+6. Add durable or remote workers only after ingestion is idempotent.
