@@ -1,4 +1,4 @@
-use bgci_core::config::{list_engine_alias_details, list_engine_aliases, resolve_engine_reference};
+use bgci_core::config::{list_engine_alias_details, resolve_engine_reference};
 use bgci_core::engines;
 use clap::Args;
 use std::process::{Command, Stdio};
@@ -28,6 +28,12 @@ pub fn run(args: EngineArgs) -> Result<(), String> {
         if args.verbose {
             for detail in list_engine_alias_details()? {
                 println!("{}", detail.name);
+                if let Some(family) = &detail.family {
+                    println!("  family: {family}");
+                }
+                if let Some(url) = &detail.url {
+                    println!("  url: {url}");
+                }
                 println!("  source: {}", detail.source);
                 println!("  command: {}", detail.command.join(" "));
                 if !detail.env.is_empty() {
@@ -36,11 +42,22 @@ pub fn run(args: EngineArgs) -> Result<(), String> {
                         println!("    {}={}", key, value);
                     }
                 }
+                if !detail.options.is_empty() {
+                    println!("  options:");
+                    for (key, value) in detail.options {
+                        println!("    {key}={value}");
+                    }
+                }
             }
             return Ok(());
         }
-        for name in list_engine_aliases()? {
-            println!("{name}");
+        println!("family               engine");
+        for detail in list_engine_alias_details()? {
+            println!(
+                "{:<20} {}",
+                detail.family.as_deref().unwrap_or("-"),
+                detail.name
+            );
         }
         return Ok(());
     }

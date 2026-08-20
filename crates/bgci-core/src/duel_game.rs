@@ -1,4 +1,4 @@
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use bkgm::codecs::gnuid;
 use bkgm::dice::Dice;
@@ -14,8 +14,8 @@ pub(crate) struct DuelGameResult {
     pub(crate) plies: usize,
     pub(crate) a_decisions: usize,
     pub(crate) b_decisions: usize,
-    pub(crate) a_decision_sec: f64,
-    pub(crate) b_decision_sec: f64,
+    pub(crate) a_decision_time: Duration,
+    pub(crate) b_decision_time: Duration,
 }
 
 pub fn seed_for_game(base_seed: u64, game_idx: usize) -> u64 {
@@ -36,8 +36,8 @@ pub(crate) fn play_game(
     let mut game = Game::new(variant);
     let mut a_decisions = 0usize;
     let mut b_decisions = 0usize;
-    let mut a_decision_sec = 0f64;
-    let mut b_decision_sec = 0f64;
+    let mut a_decision_time = Duration::ZERO;
+    let mut b_decision_time = Duration::ZERO;
 
     for ply in 0..max_plies {
         let dice = if ply == 0 {
@@ -54,8 +54,8 @@ pub(crate) fn play_game(
                 plies: ply,
                 a_decisions,
                 b_decisions,
-                a_decision_sec,
-                b_decision_sec,
+                a_decision_time,
+                b_decision_time,
             });
         }
         let position_id = gnuid::encode(game.position());
@@ -66,12 +66,12 @@ pub(crate) fn play_game(
         let chosen_move_raw = if a_to_move {
             let picked = engine_a.choose_move(&position_id, dice, x_to_move)?;
             a_decisions += 1;
-            a_decision_sec += decision_start.elapsed().as_secs_f64();
+            a_decision_time += decision_start.elapsed();
             picked
         } else {
             let picked = engine_b.choose_move(&position_id, dice, x_to_move)?;
             b_decisions += 1;
-            b_decision_sec += decision_start.elapsed().as_secs_f64();
+            b_decision_time += decision_start.elapsed();
             picked
         };
 
@@ -137,8 +137,8 @@ pub(crate) fn play_game(
                 plies: ply + 1,
                 a_decisions,
                 b_decisions,
-                a_decision_sec,
-                b_decision_sec,
+                a_decision_time,
+                b_decision_time,
             });
         }
     }
@@ -150,7 +150,7 @@ pub(crate) fn play_game(
         plies: max_plies,
         a_decisions,
         b_decisions,
-        a_decision_sec,
-        b_decision_sec,
+        a_decision_time,
+        b_decision_time,
     })
 }

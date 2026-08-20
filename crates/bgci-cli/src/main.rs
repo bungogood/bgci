@@ -1,6 +1,6 @@
 use clap::{Parser, Subcommand};
 
-use commands::{CheckArgs, DuelArgs, EngineArgs, HistoryArgs, LeagueArgs};
+use commands::{CheckArgs, DuelArgs, EngineArgs, HistoryArgs, LeagueArgs, RankArgs};
 
 mod commands;
 mod logging;
@@ -22,6 +22,8 @@ enum Commands {
     Duel(DuelArgs),
     /// Run and save a round-robin multi-engine benchmark.
     League(LeagueArgs),
+    /// Adaptively rank an engine pool over repeated mirrored batches.
+    Rank(RankArgs),
     /// Inspect saved duels and leagues.
     History(HistoryArgs),
     /// Validate an engine's UBGI behavior.
@@ -36,6 +38,7 @@ async fn main() -> Result<(), String> {
     match args.command {
         Commands::Duel(duel) => commands::duel::run(duel).await,
         Commands::League(league) => commands::league::run(league).await,
+        Commands::Rank(rank) => commands::rank::run(rank).await,
         Commands::History(history) => commands::history::run(history),
         Commands::Check(check) => commands::check::run(check),
         Commands::Engine(engine) => commands::engine::run(engine),

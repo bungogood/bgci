@@ -42,15 +42,14 @@ fn list(store: &BenchmarkStore) -> Result<(), String> {
     }
     println!(" id  kind    status     pairs       games  name");
     for row in rows {
+        let requested = if row.kind == "ranking" {
+            "open".to_string()
+        } else {
+            row.requested_pairs.to_string()
+        };
         println!(
-            "{:>3}  {:<6}  {:<9}  {:>5}/{:<5}  {:>5}  {}",
-            row.id,
-            row.kind,
-            row.status,
-            row.completed_pairs,
-            row.requested_pairs,
-            row.games,
-            row.name
+            "{:>3}  {:<7}  {:<9}  {:>5}/{:<5}  {:>5}  {}",
+            row.id, row.kind, row.status, row.completed_pairs, requested, row.games, row.name
         );
     }
     Ok(())
@@ -63,13 +62,17 @@ fn show(store: &BenchmarkStore, id: i64) -> Result<(), String> {
     println!("{} {}: {}", row.kind, row.id, row.name);
     println!("status:    {}", row.status);
     println!("variant:   {}", row.variant);
-    println!("pairs:     {}/{}", row.completed_pairs, row.requested_pairs);
+    if row.kind == "ranking" {
+        println!("pairs:     {} (open-ended)", row.completed_pairs);
+    } else {
+        println!("pairs:     {}/{}", row.completed_pairs, row.requested_pairs);
+    }
     println!("games:     {}", row.games);
     let summaries = store.engine_summaries(id)?;
     if !summaries.is_empty() {
         println!();
         println!(
-            " rank  engine                         role       games   wins   win%     points     ppg"
+            " rank  family             engine                         role       games   wins   win%     points     ppg"
         );
         for (index, summary) in summaries.iter().enumerate() {
             let win_rate = if summary.games == 0 {
@@ -83,8 +86,9 @@ fn show(store: &BenchmarkStore, id: i64) -> Result<(), String> {
                 summary.points / summary.games as f64
             };
             println!(
-                "{:>5}  {:<29}  {:<9}  {:>5}  {:>5}  {:>5.1}  {:>9.1}  {:>6.3}",
+                "{:>5}  {:<18}  {:<29}  {:<9}  {:>5}  {:>5}  {:>5.1}  {:>9.1}  {:>6.3}",
                 index + 1,
+                summary.family.as_deref().unwrap_or("-"),
                 summary.name,
                 summary.role,
                 summary.games,

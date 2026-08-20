@@ -11,8 +11,8 @@ pub struct DuelStats {
     total_plies: usize,
     a_decisions: usize,
     b_decisions: usize,
-    a_decision_sec: f64,
-    b_decision_sec: f64,
+    a_decision_time: Duration,
+    b_decision_time: Duration,
     a_wins: usize,
     b_wins: usize,
     a_gammons: usize,
@@ -90,8 +90,8 @@ impl DuelStats {
         self.total_plies += update.plies;
         self.a_decisions += update.a_decisions;
         self.b_decisions += update.b_decisions;
-        self.a_decision_sec += update.a_decision_sec;
-        self.b_decision_sec += update.b_decision_sec;
+        self.a_decision_time += update.a_decision_time;
+        self.b_decision_time += update.b_decision_time;
 
         (a_game_points, b_game_points)
     }
@@ -145,12 +145,12 @@ impl DuelStats {
             a_avg_ms: if self.a_decisions == 0 {
                 0.0
             } else {
-                (self.a_decision_sec * 1000.0) / self.a_decisions as f64
+                self.a_decision_time.as_secs_f64() * 1000.0 / self.a_decisions as f64
             },
             b_avg_ms: if self.b_decisions == 0 {
                 0.0
             } else {
-                (self.b_decision_sec * 1000.0) / self.b_decisions as f64
+                self.b_decision_time.as_secs_f64() * 1000.0 / self.b_decisions as f64
             },
             games_per_sec: games_done as f64 / elapsed_secs.max(1e-9),
             avg_ply: self.total_plies as f64 / games as f64,
@@ -168,6 +168,6 @@ pub struct GameUpdate {
     pub plies: usize,
     pub a_decisions: usize,
     pub b_decisions: usize,
-    pub a_decision_sec: f64,
-    pub b_decision_sec: f64,
+    pub a_decision_time: Duration,
+    pub b_decision_time: Duration,
 }

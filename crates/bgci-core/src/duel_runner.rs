@@ -1,6 +1,6 @@
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use bkgm::Variant;
 use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
@@ -52,6 +52,10 @@ pub struct GameRecord {
     pub points_a: f64,
     pub points_b: f64,
     pub plies: usize,
+    pub a_decisions: usize,
+    pub b_decisions: usize,
+    pub a_decision_time: Duration,
+    pub b_decision_time: Duration,
 }
 
 pub struct MatchupRun {
@@ -146,7 +150,7 @@ pub async fn run_matchup(cfg: &MatchupConfig, variant: Variant) -> Result<Matchu
 
     games.sort_by_key(|game| game.game_idx);
     for (expected_idx, game) in games.iter().enumerate() {
-        if game.game_idx != expected_idx || game.a_is_x != expected_idx.is_multiple_of(2) {
+        if game.game_idx != expected_idx || game.a_is_x != (expected_idx % 2 == 0) {
             return Err(format!(
                 "invalid mirrored game sequence at game {}",
                 expected_idx + 1
@@ -266,8 +270,8 @@ fn process_completed_game(
         plies: result.plies,
         a_decisions: result.a_decisions,
         b_decisions: result.b_decisions,
-        a_decision_sec: result.a_decision_sec,
-        b_decision_sec: result.b_decision_sec,
+        a_decision_time: result.a_decision_time,
+        b_decision_time: result.b_decision_time,
     });
 
     let outcome = if result.winner_x.is_none() {
@@ -311,5 +315,9 @@ fn process_completed_game(
         points_a: f64::from(a_game_points),
         points_b: f64::from(b_game_points),
         plies: result.plies,
+        a_decisions: result.a_decisions,
+        b_decisions: result.b_decisions,
+        a_decision_time: result.a_decision_time,
+        b_decision_time: result.b_decision_time,
     })
 }

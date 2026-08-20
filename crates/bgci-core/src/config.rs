@@ -38,6 +38,8 @@ impl Default for MatchupConfig {
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct EngineConfig {
     pub name: String,
+    #[serde(default, skip_serializing)]
+    pub family: Option<String>,
     #[serde(default)]
     pub engine: Option<String>,
     #[serde(deserialize_with = "deserialize_command")]
@@ -52,6 +54,8 @@ pub struct EngineConfig {
 #[derive(Debug, Clone)]
 pub struct EngineAliasDetail {
     pub name: String,
+    pub family: Option<String>,
+    pub url: Option<String>,
     pub source: String,
     pub command: Vec<String>,
     pub env: BTreeMap<String, String>,
@@ -62,6 +66,7 @@ impl EngineConfig {
     fn default_a() -> Self {
         Self {
             name: "random-a".to_string(),
+            family: None,
             engine: Some("random".to_string()),
             command: Vec::new(),
             env: BTreeMap::new(),
@@ -72,6 +77,7 @@ impl EngineConfig {
     fn default_b() -> Self {
         Self {
             name: "random-b".to_string(),
+            family: None,
             engine: Some("random".to_string()),
             command: Vec::new(),
             env: BTreeMap::new(),
@@ -89,6 +95,10 @@ enum CommandField {
 
 #[derive(Debug, Clone, Deserialize)]
 struct EngineTemplate {
+    #[serde(default)]
+    family: Option<String>,
+    #[serde(default)]
+    url: Option<String>,
     #[serde(deserialize_with = "deserialize_command")]
     command: Vec<String>,
     #[serde(default)]
@@ -134,6 +144,7 @@ pub fn resolve_engine_reference(alias: &str) -> Result<EngineConfig, String> {
     let registry = load_user_engine_registry()?;
     let mut engine = EngineConfig {
         name: alias.to_string(),
+        family: None,
         engine: Some(alias.to_string()),
         command: Vec::new(),
         env: BTreeMap::new(),
@@ -294,6 +305,9 @@ fn resolve_engine_alias(
     if let Some(template) = registry.get(&alias) {
         engine.command = template.command.clone();
         engine.engine = None;
+        if engine.family.is_none() {
+            engine.family = template.family.clone();
+        }
         let mut merged_env = template.env.clone();
         for (key, value) in &engine.env {
             merged_env.insert(key.clone(), value.clone());
@@ -402,6 +416,8 @@ pub fn list_engine_alias_details() -> Result<Vec<EngineAliasDetail>, String> {
             name.clone(),
             EngineAliasDetail {
                 name: name.clone(),
+                family: None,
+                url: None,
                 source: "builtin".to_string(),
                 command: builtin_display_command(&name),
                 env: BTreeMap::new(),
@@ -424,6 +440,8 @@ pub fn list_engine_alias_details() -> Result<Vec<EngineAliasDetail>, String> {
             name.clone(),
             EngineAliasDetail {
                 name,
+                family: template.family,
+                url: template.url,
                 source: "user".to_string(),
                 command,
                 env: template.env,
@@ -433,10 +451,12 @@ pub fn list_engine_alias_details() -> Result<Vec<EngineAliasDetail>, String> {
     }
 
     let mut details: Vec<_> = by_name.into_values().collect();
-    details.sort_by(|a, b| match (a.source.as_str(), b.source.as_str()) {
-        ("builtin", "user") => std::cmp::Ordering::Less,
-        ("user", "builtin") => std::cmp::Ordering::Greater,
-        _ => a.name.cmp(&b.name),
+    details.sort_by(|a, b| {
+        a.family
+            .as_deref()
+            .unwrap_or("")
+            .cmp(b.family.as_deref().unwrap_or(""))
+            .then_with(|| a.name.cmp(&b.name))
     });
     Ok(details)
 }
@@ -460,7 +480,7 @@ pub fn load_toml<T: for<'de> Deserialize<'de>>(path: impl AsRef<Path>) -> Result
 
 #[cfg(test)]
 mod tests {
-    use super::non_default_options;
+    use super::{UserConfig, non_default_options};
     use std::collections::BTreeMap;
 
     #[test]
@@ -473,5 +493,27 @@ mod tests {
         let out = non_default_options(&effective, &defaults);
         assert_eq!(out.get("engine.ply"), None);
         assert_eq!(out.get("engine.top_k"), Some(&"8".to_string()));
+    }
+
+    #[test]
+    fn parses_family_url_command_and_options() {
+        let config: UserConfig = toml::from_str(
+            r#"
+            [engines.kestral-light]
+            family = "kestral"
+            url = "https://example.com/kestral"
+            command = ["/opt/kestral", "--model", "light.bin"]
+
+            [engines.kestral-light.options]
+            "engine.ply" = "1"
+            "#,
+        )
+        .unwrap();
+        let engine = &config.engines["kestral-light"];
+
+        assert_eq!(engine.family.as_deref(), Some("kestral"));
+        assert_eq!(engine.url.as_deref(), Some("https://example.com/kestral"));
+        assert_eq!(engine.command[0], "/opt/kestral");
+        assert_eq!(engine.options["engine.ply"], "1");
     }
 }

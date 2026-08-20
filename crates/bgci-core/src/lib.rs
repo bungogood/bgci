@@ -8,6 +8,7 @@ pub mod duel_runner;
 pub mod duel_workers;
 pub mod engine;
 pub mod engines;
+pub mod ranking;
 pub mod report;
 pub mod stats;
 pub mod ubgi;

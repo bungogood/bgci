@@ -7,6 +7,8 @@ on one execution and storage model:
 
 - A duel compares two engine builds and can optionally be saved.
 - A league compares several engine builds and derives pool-scoped standings.
+- A ranking pool repeatedly schedules informative matchups and can run until
+  explicitly paused.
 
 The system records reproducible experiments. It does not treat a mutable
 leaderboard as primary data.
@@ -95,6 +97,11 @@ assumptions.
 bgci duel --engine-a A --engine-b B --pairs 10
 bgci duel --name change-123 --engine-a NEW --engine-b BASE --pairs 1000 --save
 bgci league --name engines-2026 --engines A B C --pairs-per-matchup 500
+bgci rank create main --engines A B C
+bgci rank add main --engines D
+bgci rank list
+bgci rank run main
+bgci rank show main
 bgci history list
 bgci history show ID
 ```
@@ -112,11 +119,13 @@ Implemented:
 4. Saved duels and leagues share one pair-oriented executor and schema.
 5. Run manifests are atomic and completion requires every requested pair.
 6. Reported uncertainty is calculated from completed mirror-pair scores.
+7. Adaptive ranking pools support coverage-first scheduling, information-guided
+   batches, continuous execution, and pause/resume from SQLite.
 
 Next:
 
 1. Add executable/model fingerprints when engine identities stabilize.
 2. Persist accepted pairs incrementally and support resume/verification.
-3. Derive compatible-history rankings without mutating raw records.
+3. Extend rankings with explicitly compatible cross-pool history when needed.
 4. Validate sequential stopping before introducing SPRT.
 5. Add durable or remote workers only after ingestion is idempotent.

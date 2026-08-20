@@ -46,6 +46,57 @@ bgci history list
 bgci history show 1
 ```
 
+## Adaptive Rankings
+
+Create the long-lived `main` ranking pool once:
+
+```bash
+bgci rank create main \
+  --engines kestral gnubg pubeval random \
+  --placement-opponents 3 \
+  --placement-pairs 20
+```
+
+Run a bounded amount of additional work:
+
+```bash
+bgci rank run main --budget-pairs 1000 --batch-pairs 20 --parallel 8
+```
+
+Omit `--budget-pairs` to run continuously. `Ctrl-C` requests a clean pause after
+the current mirrored batch finishes. Running the same name continues its saved
+state automatically:
+
+```bash
+bgci rank run main --batch-pairs 20 --parallel 8
+```
+
+Add engines later as provisional members, without rebuilding the table:
+
+```bash
+bgci rank add main --engines kestral-dmp-best kestral-light
+bgci rank list
+bgci rank show main
+bgci rank run main --parallel 8
+```
+
+The scheduler first places each provisional engine against a configurable
+number of distinct opponents. It then selects matchups by expected information
+using current rating uncertainty, predicted win probability, and measured move
+time. An engine that has sat out 20 batches is forced back into consideration,
+so very slow models play less often after placement but are never permanently starved. An
+engine is shown as established only after placement and after its approximate
+RD falls below the pool's `--established-rd` threshold. Ratings are recomputed
+from immutable saved games after every batch.
+
+`--batch-pairs 20` runs 20 mirrored pairs (40 games) before refitting and
+selecting again. `--placement-opponents 3 --placement-pairs 20` requires useful
+connections to three opponents, not 20 pairs against every engine in the pool.
+
+The initial model is Bradley-Terry Elo over completed game wins. Reported RD is
+an approximate diagonal uncertainty estimate; gammons and backgammons are
+retained in raw results but do not yet affect the Elo fit.
+
 The default database is:
 
 ```text
@@ -53,8 +104,8 @@ $XDG_DATA_HOME/bgci/benchmarks.db
 ~/.local/share/bgci/benchmarks.db
 ```
 
-Use `--db PATH` with `duel --save`, `league`, or `history` to select another
-database.
+Use `--db PATH` with `duel --save`, `league`, `rank`, or `history` to select
+another database.
 
 ## Benchmark Semantics
 
@@ -78,6 +129,28 @@ command = ["/path/to/wildbg", "--ubgi"]
 [engines.gnubg]
 command = ["/path/to/gnubg", "--ubgi"]
 ```
+
+Related runnable configurations can share optional family metadata while
+keeping independent commands and UBGI options:
+
+```toml
+[engines.kestral-dmp-best]
+family = "kestral"
+command = ["/path/to/kestral", "--model", "/models/dmp-best.bin"]
+
+[engines.kestral-dmp-best.options]
+"engine.ply" = "1"
+
+[engines.kestral-light]
+family = "kestral"
+command = ["/path/to/kestral", "--model", "/models/dmp-light.bin"]
+
+[engines.kestral-light.options]
+"engine.ply" = "1"
+```
+
+Family is display and organization metadata. Every alias remains a separate
+benchmark participant, and changing its family does not change launch identity.
 
 Inspect configured and built-in engines with:
 
