@@ -471,6 +471,7 @@ impl BenchmarkStore {
         &mut self,
         name: &str,
         engines: &[EngineConfig],
+        apply_options: bool,
     ) -> Result<RankingPool, String> {
         let pool = self.load_ranking_by_name(name)?;
         if pool.status != "paused" {
@@ -479,20 +480,67 @@ impl BenchmarkStore {
                 pool.name
             ));
         }
-        let configs = engines
+        let configs_by_identity = engines
             .iter()
             .map(|engine| Ok((engine_identity(engine)?, engine)))
             .collect::<Result<HashMap<_, _>, String>>()?;
+        let configs_by_name = engines
+            .iter()
+            .map(|engine| (engine.name.as_str(), engine))
+            .collect::<HashMap<_, _>>();
         let tx = self
             .conn
             .transaction()
             .map_err(|e| format!("begin refresh ranking metadata transaction: {e}"))?;
         for participant in &pool.engines {
-            let config = configs.get(&participant.identity).ok_or_else(|| {
-                format!("no current metadata found for engine {}", participant.name)
-            })?;
+            let config = if apply_options {
+                let config = configs_by_name
+                    .get(participant.name.as_str())
+                    .ok_or_else(|| {
+                        format!(
+                            "no current configuration found for engine {}",
+                            participant.name
+                        )
+                    })?;
+                if config.command != participant.config.command
+                    || config.env != participant.config.env
+                {
+                    return Err(format!(
+                        "refusing to change command or environment for existing engine {}",
+                        participant.name
+                    ));
+                }
+                if participant
+                    .config
+                    .options
+                    .iter()
+                    .any(|(key, value)| config.options.get(key) != Some(value))
+                {
+                    return Err(format!(
+                        "refusing to change an existing UBGI option for engine {}",
+                        participant.name
+                    ));
+                }
+                *config
+            } else {
+                *configs_by_identity
+                    .get(&participant.identity)
+                    .ok_or_else(|| {
+                        format!("no current metadata found for engine {}", participant.name)
+                    })?
+            };
             let configuration = serde_json::to_string(&config.configuration)
                 .map_err(|e| format!("serialize engine display configuration: {e}"))?;
+            if apply_options {
+                let identity = engine_identity(config)?;
+                let options = serde_json::to_string(&config.options)
+                    .map_err(|e| format!("serialize engine options: {e}"))?;
+                tx.execute(
+                    "UPDATE engine_builds SET identity = ?, options_json = ? WHERE id = ?",
+                    params![identity, options, participant.build_id],
+                )
+                .map_err(|e| format!("apply options for {}: {e}", participant.name))?;
+            }
             tx.execute(
                 "UPDATE benchmark_engines
                  SET family = ?, version = ?, configuration_json = ?
@@ -1671,9 +1719,10 @@ mod tests {
         a.version = Some("v2".to_string());
         a.configuration
             .insert("model".to_string(), "large".to_string());
+        a.options.insert("engine.ply".to_string(), "1".to_string());
 
         let refreshed = store
-            .refresh_ranking_engine_metadata(&pool.name, &[a, config("b")])
+            .refresh_ranking_engine_metadata(&pool.name, &[a, config("b")], true)
             .unwrap();
         let a = refreshed
             .engines
@@ -1684,6 +1733,7 @@ mod tests {
         assert_eq!(a.family.as_deref(), Some("family-a"));
         assert_eq!(a.version.as_deref(), Some("v2"));
         assert_eq!(a.configuration["model"], "large");
+        assert_eq!(a.config.options["engine.ply"], "1");
     }
 
     #[test]

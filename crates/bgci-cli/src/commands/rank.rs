@@ -114,6 +114,10 @@ struct RefreshArgs {
     /// Ranking pool name.
     #[arg(default_value = "main")]
     name: String,
+
+    /// Persist newly explicit UBGI defaults without changing existing values.
+    #[arg(long)]
+    apply_options: bool,
 }
 
 #[derive(Debug, Clone, Args)]
@@ -186,7 +190,8 @@ pub async fn run(args: RankArgs) -> Result<(), String> {
                 .map(|engine| engine.name.clone())
                 .collect::<Vec<_>>();
             let engines = resolve_engines(&specs)?;
-            let pool = store.refresh_ranking_engine_metadata(&args.name, &engines)?;
+            let pool =
+                store.refresh_ranking_engine_metadata(&args.name, &engines, args.apply_options)?;
             println!("refreshed metadata for ranking '{}'", pool.name);
             show_ranking(&store, &pool, false, verbose)
         }

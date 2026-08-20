@@ -183,6 +183,14 @@ without changing games or launch identity with:
 bgci rank refresh main
 ```
 
+After auditing engine-reported defaults, `--apply-options` can make those
+settings explicit in a paused pool. It refuses command/environment changes and
+refuses changing any option that was already explicit:
+
+```bash
+bgci rank refresh main --apply-options
+```
+
 Inspect configured and built-in engines with:
 
 ```bash
