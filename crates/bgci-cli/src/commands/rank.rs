@@ -402,17 +402,17 @@ fn show_ranking(
 }
 
 fn display_engine_name(engine: &bgci_core::benchmark::RankingEngine, verbose: bool) -> String {
-    let mut configuration = engine.configuration.clone();
-    configuration.extend(engine.config.options.clone());
+    let mut configuration = std::collections::BTreeMap::new();
+    for (key, value) in engine.configuration.iter().chain(&engine.config.options) {
+        let key = key
+            .strip_prefix("engine.")
+            .or_else(|| key.strip_prefix("game."))
+            .unwrap_or(key);
+        configuration.insert(key, value);
+    }
     let options = configuration
         .iter()
-        .map(|(key, value)| {
-            let key = key
-                .strip_prefix("engine.")
-                .or_else(|| key.strip_prefix("game."))
-                .unwrap_or(key);
-            format!("{key}={value}")
-        })
+        .map(|(key, value)| format!("{key}={value}"))
         .collect::<Vec<_>>()
         .join(",");
     let alias = engine

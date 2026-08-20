@@ -327,17 +327,20 @@ pub fn fit_rating_model(engine_count: usize, edges: &[RankingEdge]) -> RatingMod
         }
     }
     let covariance_log_odds = multiply_three(&bread_inverse, &meat, &bread_inverse);
+    let mut rating_covariance = project_centered_components(&covariance_log_odds, &edges);
     let mut covariance = project_centered(covariance_log_odds);
     let elo_scale_squared = ELO_TO_LOG_ODDS.recip().powi(2);
-    for row in &mut covariance {
-        for value in row {
-            *value *= elo_scale_squared;
-            if !value.is_finite() {
-                *value = 0.0;
+    for matrix in [&mut covariance, &mut rating_covariance] {
+        for row in matrix.iter_mut() {
+            for value in row {
+                *value *= elo_scale_squared;
+                if !value.is_finite() {
+                    *value = 0.0;
+                }
             }
         }
+        symmetrize_and_sanitize(matrix);
     }
-    symmetrize_and_sanitize(&mut covariance);
 
     let mut games_per_engine = vec![0_usize; engine_count];
     for edge in &edges {
@@ -352,7 +355,7 @@ pub fn fit_rating_model(engine_count: usize, edges: &[RankingEdge]) -> RatingMod
         .map(|(index, strength)| Rating {
             index,
             elo: 1500.0 + strength / ELO_TO_LOG_ODDS,
-            rd: covariance[index][index].sqrt().min(MAX_RD),
+            rd: rating_covariance[index][index].sqrt().min(MAX_RD),
             games: games_per_engine[index],
         })
         .collect();
@@ -545,6 +548,49 @@ fn project_centered(matrix: Vec<Vec<f64>>) -> Vec<Vec<f64>> {
                 .collect()
         })
         .collect()
+}
+
+fn project_centered_components(matrix: &[Vec<f64>], edges: &[RankingEdge]) -> Vec<Vec<f64>> {
+    let size = matrix.len();
+    let mut parent = (0..size).collect::<Vec<_>>();
+    for edge in edges {
+        union(&mut parent, edge.engine_a, edge.engine_b);
+    }
+    let mut components = BTreeMap::<usize, Vec<usize>>::new();
+    for index in 0..size {
+        components
+            .entry(root(&mut parent, index))
+            .or_default()
+            .push(index);
+    }
+    let mut projected = vec![vec![0.0; size]; size];
+    for component in components.values() {
+        if component.len() == 1 {
+            let index = component[0];
+            projected[index][index] = matrix[index][index];
+            continue;
+        }
+        let divisor = component.len() as f64;
+        let row_means = component
+            .iter()
+            .map(|&row| {
+                component
+                    .iter()
+                    .map(|&column| matrix[row][column])
+                    .sum::<f64>()
+                    / divisor
+            })
+            .collect::<Vec<_>>();
+        let grand_mean = row_means.iter().sum::<f64>() / divisor;
+        for (row_position, &row) in component.iter().enumerate() {
+            for (column_position, &column) in component.iter().enumerate() {
+                projected[row][column] =
+                    matrix[row][column] - row_means[row_position] - row_means[column_position]
+                        + grand_mean;
+            }
+        }
+    }
+    projected
 }
 
 fn symmetrize_and_sanitize(matrix: &mut [Vec<f64>]) {
@@ -1168,6 +1214,12 @@ mod tests {
         assert!(empty.ratings.iter().all(|rating| rating.elo == 1500.0));
         assert!(
             empty
+                .ratings
+                .iter()
+                .all(|rating| (rating.rd - PRIOR_RD).abs() < 1e-8)
+        );
+        assert!(
+            empty
                 .covariance
                 .iter()
                 .flatten()
@@ -1178,7 +1230,12 @@ mod tests {
         assert_eq!(disconnected.ratings[2].elo, 1500.0);
         assert_eq!(disconnected.ratings[3].elo, 1500.0);
         assert_eq!(disconnected.ratings[2].games, 0);
+        assert!((disconnected.ratings[2].rd - PRIOR_RD).abs() < 1e-8);
         assert!(disconnected.contrast_variance(2, 3) > 0.0);
+
+        let connected = fit_rating_model(2, &[edge(0, 1, 100, 50.0)]);
+        let with_new_engine = fit_rating_model(3, &[edge(0, 1, 100, 50.0)]);
+        assert!((connected.ratings[0].rd - with_new_engine.ratings[0].rd).abs() < 1e-8);
     }
 
     #[test]
