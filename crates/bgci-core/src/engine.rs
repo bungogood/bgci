@@ -14,6 +14,12 @@ use tracing::{debug, error, info};
 
 use crate::config::{ResolvedEngine, canonicalize_resolved_engine_name, resolve_engine_specs};
 
+pub(crate) enum ResponseError {
+    Engine(String),
+    MalformedBest(String),
+    Transport(String),
+}
+
 pub fn resolve_and_finalize_engines(specs: &[String]) -> Result<Vec<ResolvedEngine>, String> {
     let mut engines = Vec::with_capacity(specs.len());
     for engine in resolve_engine_specs(specs)? {
@@ -151,38 +157,27 @@ impl EngineProcess {
             self.try_set_option(&name, &value)?;
         }
         self.send(ubgi::CMD_ISREADY)?;
-        self.read_until(|l| l == "readyok")?;
+        self.wait_readyok().map_err(runtime_response_error)?;
         Ok(())
     }
 
     fn try_set_option(&mut self, name: &str, value: &str) -> Result<(), String> {
         self.send(&format!("set {name} {value}"))?;
         self.send(ubgi::CMD_ISREADY)?;
-        loop {
-            let line = self.read_line()?;
-            if line == "readyok" {
-                return Ok(());
-            }
-            if line.starts_with("error ") {
+        match self.wait_readyok() {
+            Ok(()) => Ok(()),
+            Err(ResponseError::Engine(line)) => {
                 debug!(option = %name, value = %value, response = %line, "engine rejected optional set");
-                return Ok(());
+                Ok(())
             }
+            Err(err) => Err(runtime_response_error(err)),
         }
     }
 
     pub fn new_game(&mut self) -> Result<(), String> {
         self.send(ubgi::CMD_NEWGAME)?;
         self.send(ubgi::CMD_ISREADY)?;
-        loop {
-            let line = self.read_line()?;
-            if line == "readyok" {
-                break;
-            }
-            if line.starts_with("error ") {
-                return Err(format!("engine error: {line}"));
-            }
-        }
-        Ok(())
+        self.wait_readyok().map_err(runtime_response_error)
     }
 
     pub fn set_variant(&mut self, variant: Variant) -> Result<(), String> {
@@ -192,15 +187,10 @@ impl EngineProcess {
         info!(variant = %variant_name(variant), "set engine variant");
         self.send(&format!("set game.variant {}", variant_name(variant)))?;
         self.send(ubgi::CMD_ISREADY)?;
-        loop {
-            let line = self.read_line()?;
-            if line == "readyok" {
-                return Ok(());
-            }
-            if line.starts_with("error ") {
-                return Err(format!("engine rejected variant option: {line}"));
-            }
-        }
+        self.wait_readyok().map_err(|err| match err {
+            ResponseError::Engine(line) => format!("engine rejected variant option: {line}"),
+            other => runtime_response_error(other),
+        })
     }
 
     pub fn choose_move(
@@ -209,22 +199,49 @@ impl EngineProcess {
         dice: Dice,
         _x_to_move: bool,
     ) -> Result<String, String> {
-        self.send(&ubgi::cmd_position_gnubgid(position_id))?;
-        self.send(&ubgi::cmd_dice(dice))?;
+        self.send_position_and_dice(position_id, dice)?;
         self.send(ubgi::CMD_GO_CHEQUER)?;
+        let mv = self.wait_bestmove().map_err(runtime_response_error)?;
+        info!(choice = %mv, "engine chose move");
+        Ok(mv)
+    }
+
+    pub(crate) fn send_position_and_dice(
+        &mut self,
+        position_id: &str,
+        dice: Dice,
+    ) -> Result<(), String> {
+        self.send(&ubgi::cmd_position_gnubgid(position_id))?;
+        self.send(&ubgi::cmd_dice(dice))
+    }
+
+    pub(crate) fn wait_readyok(&mut self) -> Result<(), ResponseError> {
         loop {
-            let line = self.read_line()?;
-            if let Some(mv) = line.strip_prefix("bestmove ") {
-                info!(choice = %mv.trim(), "engine chose move");
-                return Ok(mv.trim().to_string());
+            let line = self.read_line().map_err(ResponseError::Transport)?;
+            match ubgi::parse_response(&line) {
+                ubgi::Response::ReadyOk => return Ok(()),
+                ubgi::Response::Error(line) => {
+                    return Err(ResponseError::Engine(line.to_string()));
+                }
+                _ => {}
             }
-            if line.starts_with("best") {
-                error!(response = %line, "protocol error: expected bestmove payload");
-                return Err(format!("engine returned unexpected best* response: {line}"));
-            }
-            if line.starts_with("error ") {
-                error!(response = %line, "engine protocol error");
-                return Err(format!("engine error: {line}"));
+        }
+    }
+
+    pub(crate) fn wait_bestmove(&mut self) -> Result<String, ResponseError> {
+        loop {
+            let line = self.read_line().map_err(ResponseError::Transport)?;
+            match ubgi::parse_response(&line) {
+                ubgi::Response::BestMove(mv) => return Ok(mv.to_string()),
+                ubgi::Response::MalformedBest(line) => {
+                    error!(response = %line, "protocol error: expected bestmove payload");
+                    return Err(ResponseError::MalformedBest(line.to_string()));
+                }
+                ubgi::Response::Error(line) => {
+                    error!(response = %line, "engine protocol error");
+                    return Err(ResponseError::Engine(line.to_string()));
+                }
+                _ => {}
             }
         }
     }
@@ -295,6 +312,16 @@ impl EngineProcess {
                 let _ = self.child.wait();
             }
         }
+    }
+}
+
+fn runtime_response_error(err: ResponseError) -> String {
+    match err {
+        ResponseError::Engine(line) => format!("engine error: {line}"),
+        ResponseError::MalformedBest(line) => {
+            format!("engine returned unexpected best* response: {line}")
+        }
+        ResponseError::Transport(err) => err,
     }
 }
 

@@ -4,7 +4,8 @@ use bkgm::{Game, Variant, normalize_move_text};
 
 use crate::common::variant_name;
 use crate::config::ResolvedEngine;
-use crate::engine::EngineProcess;
+use crate::engine::{EngineProcess, ResponseError};
+use crate::ubgi;
 
 pub struct CheckReport {
     pub engine_name: String,
@@ -30,11 +31,18 @@ enum ProbeExpectation {
     LegalChild,
 }
 
+#[derive(Clone, Copy)]
 struct ProbeSpec {
     phase: &'static str,
     position_id: &'static str,
     dice: Dice,
     expect: ProbeExpectation,
+}
+
+struct PreparedProbe {
+    spec: ProbeSpec,
+    game: Game,
+    legal_ids: Vec<String>,
 }
 
 impl CheckReport {
@@ -67,7 +75,7 @@ pub fn run_check(engine_cfg: &ResolvedEngine, variant: Variant) -> Result<CheckR
         errors: Vec::new(),
     };
 
-    engine.send_command("ubgi")?;
+    engine.send_command(ubgi::CMD_UBGI)?;
     loop {
         let line = engine.read_response()?;
         if line == "ubgiok" || line == "readyok" {
@@ -87,30 +95,33 @@ pub fn run_check(engine_cfg: &ResolvedEngine, variant: Variant) -> Result<CheckR
         }
     }
 
-    engine.send_command("isready")?;
-    wait_readyok(&mut engine, &mut report.errors, "isready");
+    engine.send_command(ubgi::CMD_ISREADY)?;
+    record_ready(&mut engine, &mut report.errors, "isready", false);
 
     for (name, value) in engine_cfg.launch.options() {
         engine.send_command(&format!("set {name} {value}"))?;
-        engine.send_command("isready")?;
-        let _ = wait_readyok_optional(&mut engine, &mut report.errors, &format!("set {name}"));
+        engine.send_command(ubgi::CMD_ISREADY)?;
+        record_ready(
+            &mut engine,
+            &mut report.errors,
+            &format!("set {name}"),
+            true,
+        );
     }
 
-    engine.send_command("newgame")?;
-    engine.send_command("isready")?;
-    report.supports_newgame = wait_readyok(&mut engine, &mut report.errors, "newgame");
+    engine.send_command(ubgi::CMD_NEWGAME)?;
+    engine.send_command(ubgi::CMD_ISREADY)?;
+    report.supports_newgame = record_ready(&mut engine, &mut report.errors, "newgame", false);
 
     engine.send_command(&format!("set game.variant {}", variant_name(variant)))?;
-    engine.send_command("isready")?;
-    let _ = wait_readyok(&mut engine, &mut report.errors, "set game.variant");
+    engine.send_command(ubgi::CMD_ISREADY)?;
+    record_ready(&mut engine, &mut report.errors, "set game.variant", false);
 
     let game = Game::new(variant);
     let start_id = gnuid::encode(game.position());
-    engine.send_command(&format!("position gnubgid {start_id}"))?;
-    report.supports_position = true;
-
     let dice = Dice::new(6, 1);
-    engine.send_command("dice 6 1")?;
+    engine.send_position_and_dice(&start_id, dice)?;
+    report.supports_position = true;
     report.supports_dice = true;
 
     let legal_moves = game
@@ -124,13 +135,12 @@ pub fn run_check(engine_cfg: &ResolvedEngine, variant: Variant) -> Result<CheckR
         .collect();
     report.legal_preview = legal_moves.iter().take(8).map(|m| m.0.clone()).collect();
 
-    engine.send_command("go chequer")?;
-    loop {
-        let line = engine.read_response()?;
-        if let Some(mv) = line.strip_prefix("bestmove ") {
+    engine.send_command(ubgi::CMD_GO_CHEQUER)?;
+    match engine.wait_bestmove() {
+        Ok(mv) => {
             report.supports_go_chequer = true;
-            report.bestmove_raw = Some(mv.trim().to_string());
-            let canonical = normalize_move_text(mv.trim());
+            report.bestmove_raw = Some(mv.clone());
+            let canonical = normalize_move_text(&mv);
             report.bestmove_canonical = canonical.clone();
             match canonical {
                 Some(ref c) => {
@@ -139,27 +149,16 @@ pub fn run_check(engine_cfg: &ResolvedEngine, variant: Variant) -> Result<CheckR
                         Some(next) if legal_ids.iter().any(|id| id == &gnuid::encode(next)) => {}
                         _ => report.errors.push(format!(
                             "go chequer: illegal bestmove '{}' (canonical '{}')",
-                            mv.trim(),
-                            c
+                            mv, c
                         )),
                     }
                 }
                 None => report
                     .errors
-                    .push(format!("go chequer: unparsable bestmove '{}'", mv.trim())),
+                    .push(format!("go chequer: unparsable bestmove '{mv}'")),
             }
-            break;
         }
-        if line.starts_with("best") {
-            report.errors.push(format!(
-                "go chequer: expected bestmove payload, got '{line}'"
-            ));
-            break;
-        }
-        if line.starts_with("error ") {
-            report.errors.push(format!("go chequer: {line}"));
-            break;
-        }
+        Err(err) => report_response_error(&mut report.errors, "go chequer", err),
     }
 
     let probes = [
@@ -183,56 +182,38 @@ pub fn run_check(engine_cfg: &ResolvedEngine, variant: Variant) -> Result<CheckR
         },
     ];
 
-    for probe in probes {
-        run_probe(&mut report, &mut engine, variant, &probe);
+    for spec in probes {
+        if let Some(probe) = prepare_probe(variant, spec, &mut report.errors) {
+            run_probe(&mut report, &mut engine, &probe);
+        }
     }
 
     engine.quit();
     Ok(report)
 }
 
-fn run_probe(
-    report: &mut CheckReport,
-    engine: &mut EngineProcess,
-    variant: Variant,
-    probe: &ProbeSpec,
-) {
-    let position_id = probe.position_id;
-    let dice = probe.dice;
-    let phase = probe.phase;
-
-    let Ok(position) = gnuid::decode(variant, position_id) else {
-        report.errors.push(format!(
-            "{phase}: invalid probe position id '{position_id}'"
-        ));
-        return;
-    };
-
-    let mut game = Game::new(variant);
-    if let Err(err) = game.set_position(position) {
-        report
-            .errors
-            .push(format!("{phase}: failed to set probe position: {err}"));
-        return;
-    }
-
-    let legal_ids: Vec<String> = match game.legal_positions(&dice) {
-        positions if !positions.is_empty() => positions.iter().map(|p| gnuid::encode(*p)).collect(),
-        _ => {
-            report.errors.push(format!("{phase}: no legal positions"));
-            return;
-        }
-    };
-
-    let Some(mv_raw) = probe_move_notation(
-        engine,
-        variant,
+fn run_probe(report: &mut CheckReport, engine: &mut EngineProcess, probe: &PreparedProbe) {
+    let ProbeSpec {
+        phase,
         position_id,
         dice,
-        phase,
-        &mut report.errors,
-    ) else {
+        expect,
+    } = probe.spec;
+
+    if let Err(err) = engine.send_position_and_dice(position_id, dice) {
+        report.errors.push(format!("{phase}: {err}"));
         return;
+    }
+    if let Err(err) = engine.send_command(ubgi::CMD_GO_CHEQUER) {
+        report.errors.push(format!("{phase}: {err}"));
+        return;
+    }
+    let mv_raw = match engine.wait_bestmove() {
+        Ok(mv) => mv,
+        Err(err) => {
+            report_response_error(&mut report.errors, phase, err);
+            return;
+        }
     };
 
     if contains_numeric_bar_off_alias(&mv_raw) {
@@ -242,7 +223,7 @@ fn run_probe(
             .push(format!("{phase}: numeric alias in bestmove '{mv_raw}'"));
     }
 
-    match probe.expect {
+    match expect {
         ProbeExpectation::Token(expected_token) => {
             let has_expected = contains_token(&mv_raw, expected_token);
             if expected_token.eq_ignore_ascii_case("bar") {
@@ -264,7 +245,7 @@ fn run_probe(
                 return;
             };
 
-            let Some(next) = game.position().apply_move(dice, &canonical) else {
+            let Some(next) = probe.game.position().apply_move(dice, &canonical) else {
                 report.errors.push(format!(
                     "{phase}: bestmove not applicable '{}' (canonical '{}')",
                     mv_raw, canonical
@@ -273,7 +254,7 @@ fn run_probe(
             };
 
             let next_id = gnuid::encode(next);
-            if legal_ids.iter().any(|id| id == &next_id) {
+            if probe.legal_ids.iter().any(|id| id == &next_id) {
                 report.awkward_legal_probes_passed += 1;
             } else {
                 report.errors.push(format!(
@@ -284,14 +265,17 @@ fn run_probe(
     }
 }
 
-fn probe_move_notation(
-    engine: &mut EngineProcess,
+fn prepare_probe(
     variant: Variant,
-    position_id: &str,
-    dice: Dice,
-    phase: &str,
+    spec: ProbeSpec,
     errors: &mut Vec<String>,
-) -> Option<String> {
+) -> Option<PreparedProbe> {
+    let ProbeSpec {
+        phase,
+        position_id,
+        dice,
+        ..
+    } = spec;
     let Ok(position) = gnuid::decode(variant, position_id) else {
         errors.push(format!(
             "{phase}: invalid probe position id '{position_id}'"
@@ -304,63 +288,26 @@ fn probe_move_notation(
         errors.push(format!("{phase}: failed to set probe position: {err}"));
         return None;
     }
-    let legal = match game.position().legal_moves(dice) {
-        Ok(moves) => moves,
-        Err(err) => {
-            errors.push(format!("{phase}: failed to derive legal moves: {err}"));
-            return None;
-        }
-    };
-    if legal.is_empty() {
-        errors.push(format!("{phase}: probe has no legal moves"));
+    let legal_ids: Vec<String> = game
+        .legal_positions(&dice)
+        .iter()
+        .map(|position| gnuid::encode(*position))
+        .collect();
+    if legal_ids.is_empty() {
+        errors.push(format!("{phase}: no legal positions"));
         return None;
     }
-
-    if let Err(err) = engine.send_command(&format!("position gnubgid {position_id}")) {
-        errors.push(format!("{phase}: {err}"));
-        return None;
-    }
-    let (d1, d2) = match dice {
-        Dice::Double(d) => (d, d),
-        Dice::Mixed(m) => (m.big(), m.small()),
-    };
-    if let Err(err) = engine.send_command(&format!("dice {d1} {d2}")) {
-        errors.push(format!("{phase}: {err}"));
-        return None;
-    }
-    if let Err(err) = engine.send_command("go chequer") {
-        errors.push(format!("{phase}: {err}"));
-        return None;
-    }
-
-    loop {
-        match engine.read_response() {
-            Ok(line) => {
-                if let Some(mv) = line.strip_prefix("bestmove ") {
-                    return Some(mv.trim().to_string());
-                }
-                if line.starts_with("best") {
-                    errors.push(format!("{phase}: expected bestmove payload, got '{line}'"));
-                    return None;
-                }
-                if line.starts_with("error ") {
-                    errors.push(format!("{phase}: {line}"));
-                    return None;
-                }
-            }
-            Err(err) => {
-                errors.push(format!("{phase}: {err}"));
-                return None;
-            }
-        }
-    }
+    Some(PreparedProbe {
+        spec,
+        game,
+        legal_ids,
+    })
 }
 
 fn contains_numeric_bar_off_alias(raw: &str) -> bool {
     raw.split_whitespace().any(|token| {
         let cleaned = token.replace('*', "");
-        let parts: Vec<&str> = cleaned.split('/').collect();
-        parts.iter().any(|p| *p == "25" || *p == "0")
+        cleaned.split('/').any(|part| part == "25" || part == "0")
     })
 }
 
@@ -371,40 +318,31 @@ fn contains_token(raw: &str, expected: &str) -> bool {
     })
 }
 
-fn wait_readyok(engine: &mut EngineProcess, errors: &mut Vec<String>, phase: &str) -> bool {
-    loop {
-        match engine.read_response() {
-            Ok(line) if line == "readyok" => return true,
-            Ok(line) if line.starts_with("error ") => {
-                errors.push(format!("{phase}: {line}"));
-                return false;
-            }
-            Ok(_) => continue,
-            Err(err) => {
-                errors.push(format!("{phase}: {err}"));
-                return false;
-            }
+fn record_ready(
+    engine: &mut EngineProcess,
+    errors: &mut Vec<String>,
+    phase: &str,
+    optional: bool,
+) -> bool {
+    match engine.wait_readyok() {
+        Ok(()) => true,
+        Err(ResponseError::Engine(line)) if optional => {
+            eprintln!("warning: {phase} not supported ({line}); continuing");
+            false
+        }
+        Err(err) => {
+            report_response_error(errors, phase, err);
+            false
         }
     }
 }
 
-fn wait_readyok_optional(
-    engine: &mut EngineProcess,
-    errors: &mut Vec<String>,
-    phase: &str,
-) -> bool {
-    loop {
-        match engine.read_response() {
-            Ok(line) if line == "readyok" => return true,
-            Ok(line) if line.starts_with("error ") => {
-                eprintln!("warning: {phase} not supported ({line}); continuing");
-                return false;
-            }
-            Ok(_) => continue,
-            Err(err) => {
-                errors.push(format!("{phase}: {err}"));
-                return false;
-            }
+fn report_response_error(errors: &mut Vec<String>, phase: &str, err: ResponseError) {
+    let diagnostic = match err {
+        ResponseError::Engine(line) | ResponseError::Transport(line) => line,
+        ResponseError::MalformedBest(line) => {
+            format!("expected bestmove payload, got '{line}'")
         }
-    }
+    };
+    errors.push(format!("{phase}: {diagnostic}"));
 }
