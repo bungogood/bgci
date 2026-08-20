@@ -322,55 +322,36 @@ fn show_ranking(
     let model = fit_rating_model(pool.engines.len(), &data.edges);
     let mut ratings = model.ratings.clone();
     ratings.sort_by(|a, b| b.elo.total_cmp(&a.elo));
-    let mut tiers = Vec::with_capacity(ratings.len());
-    let mut tier = 1usize;
-    let mut tier_leader = ratings.first();
-    for rating in &ratings {
-        if let Some(leader) = tier_leader
-            && leader.index != rating.index
-            && leader.elo - rating.elo
-                > 1.96 * model.contrast_variance(leader.index, rating.index).sqrt()
-        {
-            tier += 1;
-            tier_leader = Some(rating);
-        }
-        tiers.push(tier);
-    }
     println!();
     println!("ranking '{}' [{}]", pool.name, pool.status);
     let engine_width = if verbose { 72 } else { 48 };
     println!(
-        " rank  tier  status       {:<engine_width$}  rating     rd  move ms   games",
+        " rank  {:<engine_width$}  rating     rd  move ms   games",
         "engine"
     );
+    let mut has_provisional = false;
     for (rank, rating) in ratings.iter().enumerate() {
         let engine = &pool.engines[rating.index];
-        let status = if is_provisional(
+        let provisional = is_provisional(
             rating,
             &data.pair_counts,
             pool.placement_opponents,
             pool.placement_pairs,
             pool.established_rd,
-        ) {
-            "provisional"
-        } else {
-            "established"
-        };
+        );
+        has_provisional |= provisional;
+        let rank_label = format!("{}{}", rank + 1, if provisional { "*" } else { "" });
         let move_ms = data.average_decision_time[rating.index]
             .map(|duration| format!("{:.2}", duration.as_secs_f64() * 1_000.0))
             .unwrap_or_else(|| "-".to_string());
         let engine_name = display_engine_name(engine, verbose);
         println!(
-            "{:>5}  {:>4}  {:<11}  {:<engine_width$}  {:>7.1}  {:>5.1}  {:>7}  {:>6}",
-            rank + 1,
-            tiers[rank],
-            status,
-            engine_name,
-            rating.elo,
-            rating.rd,
-            move_ms,
-            rating.games
+            "{:>5}  {:<engine_width$}  {:>7.1}  {:>5.1}  {:>7}  {:>6}",
+            rank_label, engine_name, rating.elo, rating.rd, move_ms, rating.games
         );
+    }
+    if has_provisional {
+        println!("  * provisional: placement or RD requirement not yet met");
     }
     if diagnostics {
         let diagnostics = transitivity_diagnostics(&model, &data.edges, 30);
@@ -385,21 +366,47 @@ fn show_ranking(
         if diagnostics.cycle_degrees == 0 {
             println!("  insufficient sampled cycles to assess non-transitivity");
         } else {
-            println!("  largest descriptive BT residuals (not significance tests)");
-            println!(
-                "  matchup                                            pairs  observed  expected  residual"
-            );
-            for residual in diagnostics.residuals.iter().take(10) {
+            println!("  engine IDs");
+            for (position, rating) in ratings.iter().enumerate() {
                 println!(
-                    "  {:<23} vs {:<23} {:>5}   {:>7.3}   {:>7.3}  {:+7.3} PPG",
-                    display_engine_name(&pool.engines[residual.engine_a], false),
-                    display_engine_name(&pool.engines[residual.engine_b], false),
-                    residual.pairs,
-                    residual.observed_score,
-                    residual.expected_score,
-                    residual.residual_ppg,
+                    "    E{:<2} {}",
+                    position + 1,
+                    display_engine_name(&pool.engines[rating.index], false)
                 );
             }
+            let mut residual_matrix = vec![vec![None; ratings.len()]; ratings.len()];
+            let mut position_by_engine = vec![0usize; ratings.len()];
+            for (position, rating) in ratings.iter().enumerate() {
+                position_by_engine[rating.index] = position;
+            }
+            for residual in &diagnostics.residuals {
+                let row = position_by_engine[residual.engine_a];
+                let column = position_by_engine[residual.engine_b];
+                residual_matrix[row][column] = Some(residual.residual_ppg);
+                residual_matrix[column][row] = Some(-residual.residual_ppg);
+            }
+            println!();
+            println!("  residual PPG matrix: row engine versus column engine");
+            println!("  positive means the row engine exceeds the global-model expectation");
+            print!("       ");
+            for column in 0..ratings.len() {
+                print!(" {:>6}", format!("E{}", column + 1));
+            }
+            println!();
+            for (row, values) in residual_matrix.iter().enumerate() {
+                print!("  E{:<2} ", row + 1);
+                for (column, value) in values.iter().enumerate() {
+                    if row == column {
+                        print!(" {:>6}", "-");
+                    } else if let Some(value) = value {
+                        print!(" {value:+6.3}");
+                    } else {
+                        print!(" {:>6}", ".");
+                    }
+                }
+                println!();
+            }
+            println!("  descriptive only; not bootstrap-calibrated significance tests");
         }
     }
     println!();

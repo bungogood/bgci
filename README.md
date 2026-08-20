@@ -89,9 +89,9 @@ that threshold, a square-root runtime penalty makes genuinely slow models play
 less without letting cheap engines crowd out higher-uncertainty engines. An engine that
 has sat out 20 batches is forced back into consideration, so very slow models
 play less often after placement but are never permanently starved. An engine is
-shown as established only after placement and after its approximate RD falls
-below the pool's `--established-rd` threshold. Ratings are recomputed from
-immutable saved games after every batch.
+marked with `*` until placement is complete and its approximate RD falls below
+the pool's `--established-rd` threshold. Ratings are recomputed from immutable
+saved games after every batch.
 
 `--batch-pairs 20` runs 20 mirrored pairs (40 games) before refitting and
 selecting again. `--placement-opponents 3 --placement-pairs 20` requires useful
@@ -102,8 +102,6 @@ mapped from `[-3, +3]` to a score in `[0, 1]`, so gammons and backgammons affect
 the rating direction and negative PPG cannot be treated as a winning result.
 Reported RD comes from full pool-relative covariance calibrated with mirrored
 pairs as score clusters and finite-sample shrinkage toward model information.
-The `tier` column groups engines from a common tier leader whose
-rating-difference interval still overlaps at the working 95% level.
 
 Raw games remain authoritative, while transactionally maintained per-matchup
 and per-engine projections make routine fitting independent of total game
