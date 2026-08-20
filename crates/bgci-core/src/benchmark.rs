@@ -492,6 +492,7 @@ impl BenchmarkStore {
             .conn
             .transaction()
             .map_err(|e| format!("begin refresh ranking metadata transaction: {e}"))?;
+        let mut replaced_build = false;
         for participant in &pool.engines {
             let config = if apply_options {
                 let config = configs_by_name
@@ -531,16 +532,16 @@ impl BenchmarkStore {
             };
             let configuration = serde_json::to_string(&config.configuration)
                 .map_err(|e| format!("serialize engine display configuration: {e}"))?;
-            if apply_options {
-                let identity = engine_identity(config)?;
-                let options = serde_json::to_string(&config.options)
-                    .map_err(|e| format!("serialize engine options: {e}"))?;
-                tx.execute(
-                    "UPDATE engine_builds SET identity = ?, options_json = ? WHERE id = ?",
-                    params![identity, options, participant.build_id],
-                )
-                .map_err(|e| format!("apply options for {}: {e}", participant.name))?;
-            }
+            let build_id = if apply_options {
+                let build_id = ensure_engine_build(&tx, config)?;
+                if build_id != participant.build_id {
+                    replace_ranking_build(&tx, pool.id, participant.build_id, build_id)?;
+                    replaced_build = true;
+                }
+                build_id
+            } else {
+                participant.build_id
+            };
             tx.execute(
                 "UPDATE benchmark_engines
                  SET family = ?, version = ?, configuration_json = ?
@@ -550,10 +551,13 @@ impl BenchmarkStore {
                     config.version.as_deref(),
                     configuration,
                     pool.id,
-                    participant.build_id,
+                    build_id,
                 ],
             )
             .map_err(|e| format!("refresh metadata for {}: {e}", participant.name))?;
+        }
+        if replaced_build {
+            rebuild_ranking_projections(&tx)?;
         }
         tx.commit()
             .map_err(|e| format!("commit ranking metadata refresh: {e}"))?;
@@ -1036,29 +1040,9 @@ fn add_engine(
     role: &str,
     config: &EngineConfig,
 ) -> Result<i64, String> {
-    let identity = engine_identity(config)?;
-    let command = serde_json::to_string(&config.command)
-        .map_err(|e| format!("serialize engine command: {e}"))?;
-    let env = serde_json::to_string(&config.env)
-        .map_err(|e| format!("serialize engine environment: {e}"))?;
-    let options = serde_json::to_string(&config.options)
-        .map_err(|e| format!("serialize engine options: {e}"))?;
+    let build_id = ensure_engine_build(tx, config)?;
     let configuration = serde_json::to_string(&config.configuration)
         .map_err(|e| format!("serialize engine display configuration: {e}"))?;
-    tx.execute(
-        "INSERT INTO engine_builds(identity, name, command_json, env_json, options_json)
-         VALUES (?, ?, ?, ?, ?)
-         ON CONFLICT(identity) DO NOTHING",
-        params![identity, config.name, command, env, options],
-    )
-    .map_err(|e| format!("insert engine build: {e}"))?;
-    let build_id: i64 = tx
-        .query_row(
-            "SELECT id FROM engine_builds WHERE identity = ?",
-            params![identity],
-            |row| row.get(0),
-        )
-        .map_err(|e| format!("load engine build: {e}"))?;
     tx.execute(
         "INSERT INTO benchmark_engines(
              benchmark_id, engine_build_id, role, family, version, configuration_json
@@ -1082,6 +1066,84 @@ fn add_engine(
     )
     .map_err(|e| format!("add benchmark engine: {e}"))?;
     Ok(build_id)
+}
+
+fn ensure_engine_build(tx: &Transaction<'_>, config: &EngineConfig) -> Result<i64, String> {
+    let identity = engine_identity(config)?;
+    let command = serde_json::to_string(&config.command)
+        .map_err(|e| format!("serialize engine command: {e}"))?;
+    let env = serde_json::to_string(&config.env)
+        .map_err(|e| format!("serialize engine environment: {e}"))?;
+    let options = serde_json::to_string(&config.options)
+        .map_err(|e| format!("serialize engine options: {e}"))?;
+    tx.execute(
+        "INSERT INTO engine_builds(identity, name, command_json, env_json, options_json)
+         VALUES (?, ?, ?, ?, ?)
+         ON CONFLICT(identity) DO NOTHING",
+        params![identity, config.name, command, env, options],
+    )
+    .map_err(|e| format!("insert engine build: {e}"))?;
+    let build_id: i64 = tx
+        .query_row(
+            "SELECT id FROM engine_builds WHERE identity = ?",
+            params![identity],
+            |row| row.get(0),
+        )
+        .map_err(|e| format!("load engine build: {e}"))?;
+    Ok(build_id)
+}
+
+fn replace_ranking_build(
+    tx: &Transaction<'_>,
+    benchmark_id: i64,
+    old_build_id: i64,
+    new_build_id: i64,
+) -> Result<(), String> {
+    let duplicate: bool = tx
+        .query_row(
+            "SELECT EXISTS(
+               SELECT 1 FROM benchmark_engines
+               WHERE benchmark_id = ? AND engine_build_id = ? AND role = 'member'
+             )",
+            params![benchmark_id, new_build_id],
+            |row| row.get(0),
+        )
+        .map_err(|e| format!("check replacement ranking build: {e}"))?;
+    if duplicate {
+        return Err("refreshed options duplicate another engine in the ranking".to_string());
+    }
+
+    for column in ["engine_x_id", "engine_o_id", "winner_id"] {
+        tx.execute(
+            &format!(
+                "UPDATE games SET {column} = ?
+                 WHERE {column} = ? AND pair_id IN (
+                   SELECT p.id FROM pairs p
+                   JOIN matchups m ON m.id = p.matchup_id
+                   WHERE m.benchmark_id = ?
+                 )"
+            ),
+            params![new_build_id, old_build_id, benchmark_id],
+        )
+        .map_err(|e| format!("replace ranking game build: {e}"))?;
+    }
+    for column in ["engine_a_id", "engine_b_id"] {
+        tx.execute(
+            &format!(
+                "UPDATE matchups SET {column} = ?
+                 WHERE benchmark_id = ? AND {column} = ?"
+            ),
+            params![new_build_id, benchmark_id, old_build_id],
+        )
+        .map_err(|e| format!("replace ranking matchup build: {e}"))?;
+    }
+    tx.execute(
+        "UPDATE benchmark_engines SET engine_build_id = ?
+         WHERE benchmark_id = ? AND engine_build_id = ? AND role = 'member'",
+        params![new_build_id, benchmark_id, old_build_id],
+    )
+    .map_err(|e| format!("replace ranking member build: {e}"))?;
+    Ok(())
 }
 
 fn engine_identity(config: &EngineConfig) -> Result<String, String> {
@@ -1709,10 +1771,29 @@ mod tests {
     }
 
     #[test]
-    fn ranking_metadata_can_be_refreshed_without_changing_identity() {
+    fn ranking_refresh_replaces_only_its_immutable_build_snapshot() {
         let mut store =
             BenchmarkStore::from_connection(Connection::open_in_memory().unwrap()).unwrap();
         let pool = ranking_pool(&mut store);
+        let old_a_id = pool.engines[0].build_id;
+        let shared = store
+            .start_duel(
+                BenchmarkSpec {
+                    name: "shared-build-duel",
+                    variant: "backgammon",
+                    seed: 7,
+                    max_plies: 512,
+                    pairs: 1,
+                },
+                &config("a"),
+                &config("b"),
+            )
+            .unwrap();
+        assert_eq!(shared.matchups[0].engine_a_id, old_a_id);
+        let matchup = store.start_ranking_batch(&pool, 0, 1, 1).unwrap();
+        store
+            .record_games(matchup, &[game(0, true), game(1, false)])
+            .unwrap();
         store.pause_ranking(pool.id).unwrap();
         let mut a = config("a");
         a.family = Some("family-a".to_string());
@@ -1734,6 +1815,23 @@ mod tests {
         assert_eq!(a.version.as_deref(), Some("v2"));
         assert_eq!(a.configuration["model"], "large");
         assert_eq!(a.config.options["engine.ply"], "1");
+        assert_ne!(a.build_id, old_a_id);
+        assert_eq!(shared.matchups[0].engine_a_id, old_a_id);
+
+        let old_options: String = store
+            .conn
+            .query_row(
+                "SELECT options_json FROM engine_builds WHERE id = ?",
+                params![old_a_id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(old_options, "{}");
+
+        let data = store.ranking_data(&refreshed).unwrap();
+        assert_eq!(data.edges.len(), 1);
+        assert_eq!(data.edges[0].rated_games, 2);
+        assert_eq!(data.pair_counts[0][1], 1);
     }
 
     #[test]
