@@ -1,9 +1,8 @@
 use bkgm::dice::Dice;
+use bkgm::ubgi::{UbgiEngine, UbgiError, UbgiMove, run_ubgi_stdio};
 use bkgm::{Game, encode_move_steps};
 
-use super::runtime::{UbgiEngine, UbgiError, UbgiMove, run_ubgi_stdio};
-
-pub fn run(_args: &[String]) -> Result<(), String> {
+pub(super) fn run(_args: &[String]) -> Result<(), String> {
     let mut adapter = RandomAdapter;
     run_ubgi_stdio(&mut adapter);
     Ok(())

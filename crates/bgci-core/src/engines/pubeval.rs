@@ -2,11 +2,10 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use bkgm::dice::Dice;
+use bkgm::ubgi::{UbgiEngine, UbgiError, UbgiMove, run_ubgi_stdio};
 use bkgm::{Game, State, VariantPosition, encode_move_steps};
 
-use super::runtime::{UbgiEngine, UbgiError, UbgiMove, run_ubgi_stdio};
-
-pub fn run(args: &[String]) -> Result<(), String> {
+pub(super) fn run(args: &[String]) -> Result<(), String> {
     let weights = load_weights(&parse_pubeval_args(args)?)?;
     let mut adapter = PubevalAdapter { weights };
     run_ubgi_stdio(&mut adapter);

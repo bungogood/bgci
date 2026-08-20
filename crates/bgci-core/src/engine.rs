@@ -79,7 +79,7 @@ fn probe_supported_engine_options(cfg: &ResolvedEngine) -> Result<HashSet<String
     Ok(keys)
 }
 
-pub struct EngineProcess {
+pub(crate) struct EngineProcess {
     child: Child,
     stdin: ChildStdin,
     stdout: BufReader<ChildStdout>,
@@ -87,7 +87,7 @@ pub struct EngineProcess {
 }
 
 impl EngineProcess {
-    pub fn spawn(config: &ResolvedEngine) -> Result<Self, String> {
+    pub(crate) fn spawn(config: &ResolvedEngine) -> Result<Self, String> {
         let command = config.launch.command();
         let mut cmd = Command::new(&command[0]);
         if command.len() > 1 {
@@ -149,7 +149,7 @@ impl EngineProcess {
         })
     }
 
-    pub fn init_ubgi(&mut self) -> Result<(), String> {
+    pub(crate) fn init_ubgi(&mut self) -> Result<(), String> {
         info!("ubgi handshake start");
         self.send(ubgi::CMD_UBGI)?;
         self.read_until(|l| l == "ubgiok" || l == "readyok")?;
@@ -174,13 +174,13 @@ impl EngineProcess {
         }
     }
 
-    pub fn new_game(&mut self) -> Result<(), String> {
+    pub(crate) fn new_game(&mut self) -> Result<(), String> {
         self.send(ubgi::CMD_NEWGAME)?;
         self.send(ubgi::CMD_ISREADY)?;
         self.wait_readyok().map_err(runtime_response_error)
     }
 
-    pub fn set_variant(&mut self, variant: Variant) -> Result<(), String> {
+    pub(crate) fn set_variant(&mut self, variant: Variant) -> Result<(), String> {
         if variant == Variant::Backgammon {
             return Ok(());
         }
@@ -193,7 +193,7 @@ impl EngineProcess {
         })
     }
 
-    pub fn choose_move(&mut self, position_id: &str, dice: Dice) -> Result<String, String> {
+    pub(crate) fn choose_move(&mut self, position_id: &str, dice: Dice) -> Result<String, String> {
         self.send_position_and_dice(position_id, dice)?;
         self.send(ubgi::CMD_GO_CHEQUER)?;
         let mv = self.wait_bestmove().map_err(runtime_response_error)?;
@@ -241,16 +241,16 @@ impl EngineProcess {
         }
     }
 
-    pub fn quit(&mut self) {
+    pub(crate) fn quit(&mut self) {
         let _ = self.send(ubgi::CMD_QUIT);
         self.reap_child();
     }
 
-    pub fn send_command(&mut self, command: &str) -> Result<(), String> {
+    pub(crate) fn send_command(&mut self, command: &str) -> Result<(), String> {
         self.send(command)
     }
 
-    pub fn read_response(&mut self) -> Result<String, String> {
+    pub(crate) fn read_response(&mut self) -> Result<String, String> {
         self.read_line()
     }
 

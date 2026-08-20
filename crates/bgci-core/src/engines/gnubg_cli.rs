@@ -7,8 +7,7 @@ use std::time::{Duration, Instant};
 use bkgm::Game;
 use bkgm::codecs::gnuid;
 use bkgm::dice::Dice;
-
-use super::runtime::{UbgiEngine, UbgiError, UbgiMove, parse_ubgi_move, run_ubgi_stdio};
+use bkgm::ubgi::{UbgiEngine, UbgiError, UbgiMove, parse_ubgi_move, run_ubgi_stdio};
 
 struct GnubgSession {
     child: Child,
@@ -124,7 +123,7 @@ impl Drop for GnubgSession {
     }
 }
 
-pub fn run(_args: &[String]) -> Result<(), String> {
+pub(super) fn run(_args: &[String]) -> Result<(), String> {
     let mut adapter = GnubgCliAdapter {
         gnubg_bin: resolve_gnubg_bin(),
         gnubg_pkgdatadir: resolve_gnubg_pkgdatadir(),

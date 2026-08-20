@@ -3,9 +3,8 @@ mod hureval;
 mod pipcount;
 mod pubeval;
 mod random;
-mod runtime;
 
-pub const BUILTIN_ENGINE_NAMES: [&str; 5] =
+pub(crate) const BUILTIN_ENGINE_NAMES: [&str; 5] =
     ["gnubg-cli", "hureval", "pipcount", "pubeval", "random"];
 
 struct BuiltinEngine {
@@ -41,10 +40,6 @@ pub fn builtin_engine_name(alias: &str) -> Option<&'static str> {
         .iter()
         .find(|engine| engine.name == alias)
         .map(|engine| engine.name)
-}
-
-pub fn run_by_name(kind: &str) -> Result<(), String> {
-    run_by_name_with_args(kind, &[])
 }
 
 pub fn run_by_name_with_args(kind: &str, args: &[String]) -> Result<(), String> {

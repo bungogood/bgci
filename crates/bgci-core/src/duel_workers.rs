@@ -20,15 +20,15 @@ pub(crate) enum WorkerMessage {
 }
 
 #[derive(Clone)]
-pub struct LocalWorkerSpec {
-    pub workers: usize,
-    pub pairs: usize,
-    pub variant: Variant,
-    pub max_plies: usize,
-    pub base_seed: u64,
-    pub engine_a: ResolvedEngine,
-    pub engine_b: ResolvedEngine,
-    pub cancel: Arc<AtomicBool>,
+pub(crate) struct LocalWorkerSpec {
+    pub(crate) workers: usize,
+    pub(crate) pairs: usize,
+    pub(crate) variant: Variant,
+    pub(crate) max_plies: usize,
+    pub(crate) base_seed: u64,
+    pub(crate) engine_a: ResolvedEngine,
+    pub(crate) engine_b: ResolvedEngine,
+    pub(crate) cancel: Arc<AtomicBool>,
 }
 
 pub(crate) fn spawn_local_workers(

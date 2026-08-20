@@ -1,13 +1,13 @@
 use bkgm::dice::Dice;
 
-pub const CMD_UBGI: &str = "ubgi";
-pub const CMD_ISREADY: &str = "isready";
-pub const CMD_NEWGAME: &str = "newgame";
-pub const CMD_GO_CHEQUER: &str = "go chequer";
-pub const CMD_QUIT: &str = "quit";
+pub(crate) const CMD_UBGI: &str = "ubgi";
+pub(crate) const CMD_ISREADY: &str = "isready";
+pub(crate) const CMD_NEWGAME: &str = "newgame";
+pub(crate) const CMD_GO_CHEQUER: &str = "go chequer";
+pub(crate) const CMD_QUIT: &str = "quit";
 
 #[derive(Debug, PartialEq, Eq)]
-pub enum Response<'a> {
+pub(crate) enum Response<'a> {
     ReadyOk,
     BestMove(&'a str),
     Error(&'a str),
@@ -15,7 +15,7 @@ pub enum Response<'a> {
     Irrelevant,
 }
 
-pub fn parse_response(line: &str) -> Response<'_> {
+pub(crate) fn parse_response(line: &str) -> Response<'_> {
     if line == "readyok" {
         Response::ReadyOk
     } else if let Some(mv) = line.strip_prefix("bestmove ") {
@@ -29,11 +29,11 @@ pub fn parse_response(line: &str) -> Response<'_> {
     }
 }
 
-pub fn cmd_position_gnubgid(position_id: &str) -> String {
+pub(crate) fn cmd_position_gnubgid(position_id: &str) -> String {
     format!("position gnubgid {position_id}")
 }
 
-pub fn cmd_dice(dice: Dice) -> String {
+pub(crate) fn cmd_dice(dice: Dice) -> String {
     let (d1, d2) = match dice {
         Dice::Double(d) => (d, d),
         Dice::Mixed(m) => (m.big(), m.small()),

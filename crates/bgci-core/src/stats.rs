@@ -2,7 +2,7 @@ use std::collections::BTreeMap;
 use std::time::Duration;
 
 #[derive(Default)]
-pub struct DuelStats {
+pub(crate) struct DuelStats {
     a_points: f32,
     pair_points: BTreeMap<usize, (f64, usize)>,
     incomplete: usize,
@@ -30,11 +30,11 @@ pub struct DuelStats {
 }
 
 impl DuelStats {
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 
-    pub fn record_game(&mut self, update: &GameUpdate) -> f32 {
+    pub(crate) fn record_game(&mut self, update: &GameUpdate) -> f32 {
         let a_game_points = if update.a_is_x {
             update.points_x
         } else {
@@ -94,7 +94,7 @@ impl DuelStats {
         a_game_points
     }
 
-    pub fn status_lines(
+    pub(crate) fn status_lines(
         &self,
         engine_a: &str,
         engine_b: &str,
@@ -216,15 +216,15 @@ fn fmt_duration_short(d: Duration) -> String {
     }
 }
 
-pub struct GameUpdate {
-    pub game_idx: usize,
-    pub a_is_x: bool,
-    pub winner_x: Option<bool>,
-    pub points_x: f32,
-    pub points_o: f32,
-    pub plies: usize,
-    pub a_decisions: usize,
-    pub b_decisions: usize,
-    pub a_decision_time: Duration,
-    pub b_decision_time: Duration,
+pub(crate) struct GameUpdate {
+    pub(crate) game_idx: usize,
+    pub(crate) a_is_x: bool,
+    pub(crate) winner_x: Option<bool>,
+    pub(crate) points_x: f32,
+    pub(crate) points_o: f32,
+    pub(crate) plies: usize,
+    pub(crate) a_decisions: usize,
+    pub(crate) b_decisions: usize,
+    pub(crate) a_decision_time: Duration,
+    pub(crate) b_decision_time: Duration,
 }

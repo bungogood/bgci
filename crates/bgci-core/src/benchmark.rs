@@ -19,7 +19,7 @@ const BENCHMARK_SUMMARY_PROJECTION: &str =
      LEFT JOIN games g ON g.matchup_id = m.id";
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum BenchmarkKind {
+enum BenchmarkKind {
     Duel,
     League,
     Ranking,
@@ -315,7 +315,7 @@ impl Database {
         self.load_ranking(benchmark_id)
     }
 
-    pub fn load_ranking(&self, benchmark_id: i64) -> Result<RankingPool, String> {
+    fn load_ranking(&self, benchmark_id: i64) -> Result<RankingPool, String> {
         let (
             name,
             status,
