@@ -98,7 +98,7 @@ pub fn run_check(engine_cfg: &ResolvedEngine, variant: Variant) -> Result<CheckR
     engine.send_command(ubgi::CMD_ISREADY)?;
     record_ready(&mut engine, &mut report.errors, "isready", false);
 
-    for (name, value) in engine_cfg.launch.options() {
+    for (name, value) in engine_cfg.launch.ubgi() {
         engine.send_command(&format!("set {name} {value}"))?;
         engine.send_command(ubgi::CMD_ISREADY)?;
         record_ready(

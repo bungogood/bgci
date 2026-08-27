@@ -1,13 +1,11 @@
-pairs = 50
+games = 100
 seed = 42
 max_plies = 512
 variant = "backgammon"
 log_level = "info"
 
 [engine_a]
-name = "gnubg-cli"
-engine = "gnubg-cli"
+profile = "gnubg-cli"
 
 [engine_b]
-name = "random"
-engine = "random"
+profile = "random"

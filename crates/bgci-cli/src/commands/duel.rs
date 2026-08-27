@@ -5,7 +5,7 @@ use bgci_core::common::{parse_variant, variant_name};
 use bgci_core::config::{
     MatchupConfig, ResolvedMatchup, load_toml, resolve_engine_input, resolve_engine_spec,
 };
-use bgci_core::duel_runner::run_matchup;
+use bgci_core::duel_runner::{run_matchup, run_matchup_with_transcripts};
 use bgci_core::engine::finalize_resolved_engine;
 use clap::Args;
 use tracing::info;
@@ -18,23 +18,23 @@ pub struct DuelArgs {
     #[arg(short = 'c', long)]
     config: Option<String>,
 
-    /// First engine alias or option-qualified specification.
+    /// First profile alias or option-qualified engine specification.
     #[arg(short = 'a', long = "engine-a")]
     engine_a: Option<String>,
 
-    /// Second engine alias or option-qualified specification.
+    /// Second profile alias or option-qualified engine specification.
     #[arg(short = 'b', long = "engine-b")]
     engine_b: Option<String>,
 
-    /// Number of mirrored pairs; each pair contains two games.
+    /// Number of games to run.
     #[arg(long)]
-    pairs: Option<usize>,
+    games: Option<usize>,
 
-    /// Number of pair workers to run concurrently.
+    /// Number of mirrored game groups to run concurrently.
     #[arg(short = 'p', long)]
     parallel: Option<usize>,
 
-    /// Base seed used to derive deterministic pair dice streams.
+    /// Base seed used to derive deterministic mirrored dice streams.
     #[arg(short = 's', long)]
     seed: Option<u64>,
 
@@ -42,7 +42,7 @@ pub struct DuelArgs {
     #[arg(short = 'm', long = "max-plies")]
     max_plies: Option<usize>,
 
-    /// Backgammon variant used by both games in every pair.
+    /// Backgammon variant used by every game.
     #[arg(long)]
     variant: Option<String>,
 
@@ -66,26 +66,24 @@ pub struct DuelArgs {
     #[arg(long = "db", requires = "save")]
     db_path: Option<PathBuf>,
 
-    #[arg(long = "ply")]
-    ply: Option<usize>,
-
-    #[arg(long = "ply-a")]
-    ply_a: Option<usize>,
-
-    #[arg(long = "ply-b")]
-    ply_b: Option<usize>,
+    /// Write this duel's games as a Jellyfish MAT money session.
+    #[arg(long, value_name = "PATH")]
+    mat: Option<PathBuf>,
 }
 
 pub async fn run(args: DuelArgs) -> Result<(), String> {
     let built = build_matchup_config(&args)?;
     let _log_guard = logging::init_tracing(&built.log_level, args.log_file.as_deref())?;
     let mut cfg = built.matchup;
+    if args.mat.is_some() {
+        bgci_core::mat::ensure_supported(cfg.variant)?;
+    }
     cfg.engine_a = finalize_resolved_engine(cfg.engine_a);
     cfg.engine_b = finalize_resolved_engine(cfg.engine_b);
 
     info!(
         log_level = %built.log_level,
-        pairs = cfg.pairs,
+        games = cfg.games,
         parallel = cfg.parallel,
         seed = cfg.seed,
         max_plies = cfg.max_plies,
@@ -106,7 +104,12 @@ pub async fn run(args: DuelArgs) -> Result<(), String> {
     } else {
         None
     };
-    let run = match run_matchup(&cfg).await {
+    let run_result = if args.mat.is_some() {
+        run_matchup_with_transcripts(&cfg).await
+    } else {
+        run_matchup(&cfg).await
+    };
+    let run = match run_result {
         Ok(run) => run,
         Err(error) => {
             if let Some(saved) = &saved {
@@ -124,6 +127,16 @@ pub async fn run(args: DuelArgs) -> Result<(), String> {
             saved.id,
             saved.db_path.display()
         );
+    }
+    if let Some(path) = &args.mat {
+        bgci_core::mat::write_session(
+            path,
+            &cfg.engine_a.name,
+            &cfg.engine_b.name,
+            cfg.variant,
+            &run.games,
+        )?;
+        println!("mat -> {}", path.display());
     }
     let summary = run.summary;
     for line in summary.lines {
@@ -161,14 +174,11 @@ fn build_matchup_config(args: &DuelArgs) -> Result<DuelConfig, String> {
         MatchupConfig::default()
     };
 
-    cfg.pairs = match args.pairs {
-        Some(0) => return Err("--pairs must be greater than zero".to_string()),
-        Some(pairs) => pairs,
-        None => cfg.pairs,
+    cfg.games = match args.games {
+        Some(0) => return Err("--games must be greater than zero".to_string()),
+        Some(games) => games,
+        None => cfg.games,
     };
-    cfg.pairs
-        .checked_mul(2)
-        .ok_or_else(|| "pair count is too large".to_string())?;
     if let Some(parallel) = args.parallel {
         cfg.parallel = parallel;
     }
@@ -193,8 +203,8 @@ fn build_matchup_config(args: &DuelArgs) -> Result<DuelConfig, String> {
         None => resolve_engine_input(cfg.engine_b)?,
     };
     let log_level = cfg.log_level;
-    let mut matchup = ResolvedMatchup {
-        pairs: cfg.pairs,
+    let matchup = ResolvedMatchup {
+        games: cfg.games,
         parallel: cfg.parallel,
         seed: cfg.seed,
         max_plies: cfg.max_plies,
@@ -202,29 +212,6 @@ fn build_matchup_config(args: &DuelArgs) -> Result<DuelConfig, String> {
         engine_a,
         engine_b,
     };
-
-    let ply_a = args.ply_a.or(args.ply);
-    let ply_b = args.ply_b.or(args.ply);
-    if let Some(ply) = ply_a {
-        if ply < 1 {
-            return Err("--ply-a/--ply must be >= 1".to_string());
-        }
-        matchup
-            .engine_a
-            .launch
-            .options_mut()
-            .insert("engine.ply".to_string(), ply.to_string());
-    }
-    if let Some(ply) = ply_b {
-        if ply < 1 {
-            return Err("--ply-b/--ply must be >= 1".to_string());
-        }
-        matchup
-            .engine_b
-            .launch
-            .options_mut()
-            .insert("engine.ply".to_string(), ply.to_string());
-    }
 
     Ok(DuelConfig { matchup, log_level })
 }
@@ -246,7 +233,7 @@ impl SavedDuel {
                 variant: variant_name(cfg.variant),
                 seed: cfg.seed,
                 max_plies: cfg.max_plies,
-                pairs: cfg.pairs,
+                games: cfg.games,
             },
             &cfg.engine_a,
             &cfg.engine_b,

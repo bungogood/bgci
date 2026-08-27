@@ -62,6 +62,17 @@ Key naming convention:
 - `game.*` for game/session context (example: `game.variant`)
 - `engine.*` for engine behavior (example: `engine.ply`)
 
+`engine.ply`, when implemented, is the root-inclusive checker-play decision
+depth. One ply means generating every legal move for the supplied position and
+dice, then evaluating each resulting position without further lookahead. Two
+plies additionally average over the opponent's possible rolls and best replies.
+A dice roll is a chance node, not a ply.
+
+This differs by one from GNU Backgammon's native evaluation-depth terminology:
+UBGI 1-ply is GNU 0-ply, UBGI 2-ply is GNU 1-ply, and so on. Adapters exposing
+`engine.ply` must translate native settings to this definition. They may expose
+a separate engine-specific key for the untranslated native setting.
+
 ## 4. Responses (Engine -> Controller)
 
 ### Handshake and Readiness
@@ -97,7 +108,7 @@ Type examples:
 
 Examples:
 
-- `key engine.ply int 1..4 1 search depth`
+- `key engine.ply int 1..4 1 root-inclusive decision depth`
 - `key engine.threads int 1..64 8 ! worker threads`
 - `key engine.seed int * 42 ! rng seed`
 

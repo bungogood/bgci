@@ -40,16 +40,16 @@ fn list(store: &Database) -> Result<(), String> {
         println!("no saved bgci runs");
         return Ok(());
     }
-    println!(" id  kind    status     pairs       games  name");
+    println!(" id  kind    status       games  name");
     for row in rows {
         let requested = if row.kind == "ranking" {
             "open".to_string()
         } else {
-            row.requested_pairs.to_string()
+            row.requested_games.to_string()
         };
         println!(
-            "{:>3}  {:<7}  {:<9}  {:>5}/{:<5}  {:>5}  {}",
-            row.id, row.kind, row.status, row.completed_pairs, requested, row.games, row.name
+            "{:>3}  {:<7}  {:<9}  {:>5}/{:<5}  {}",
+            row.id, row.kind, row.status, row.games, requested, row.name
         );
     }
     Ok(())
@@ -63,11 +63,10 @@ fn show(store: &Database, id: i64) -> Result<(), String> {
     println!("status:    {}", row.status);
     println!("variant:   {}", row.variant);
     if row.kind == "ranking" {
-        println!("pairs:     {} (open-ended)", row.completed_pairs);
+        println!("games:     {} (open-ended)", row.games);
     } else {
-        println!("pairs:     {}/{}", row.completed_pairs, row.requested_pairs);
+        println!("games:     {}/{}", row.games, row.requested_games);
     }
-    println!("games:     {}", row.games);
     let summaries = store.engine_summaries(id)?;
     if !summaries.is_empty() {
         println!();

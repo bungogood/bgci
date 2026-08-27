@@ -8,12 +8,14 @@ use tokio::task;
 use tokio::task::JoinHandle;
 
 use crate::config::ResolvedEngine;
-use crate::duel_game::{DuelGameResult, play_game, seed_for_game};
+use crate::duel_game::{DuelGameResult, play_game, seed_for_game, singleton_leg};
 use crate::engine::EngineProcess;
 
 pub(crate) enum WorkerMessage {
     Game {
         game_idx: usize,
+        pair_index: usize,
+        leg: usize,
         result: DuelGameResult,
     },
     Error(String),
@@ -22,13 +24,14 @@ pub(crate) enum WorkerMessage {
 #[derive(Clone)]
 pub(crate) struct LocalWorkerSpec {
     pub(crate) workers: usize,
-    pub(crate) pairs: usize,
+    pub(crate) games: usize,
     pub(crate) variant: Variant,
     pub(crate) max_plies: usize,
     pub(crate) base_seed: u64,
     pub(crate) engine_a: ResolvedEngine,
     pub(crate) engine_b: ResolvedEngine,
     pub(crate) cancel: Arc<AtomicBool>,
+    pub(crate) record_transcripts: bool,
 }
 
 pub(crate) fn spawn_local_workers(
@@ -67,12 +70,19 @@ fn run_worker(
         .and_then(|()| engine_b.set_variant(spec.variant))
         .map_err(|error| format!("worker {worker} engine init failed: {error}"))?;
 
-    'pairs: for pair_idx in (worker_id..spec.pairs).step_by(spec.workers) {
-        for leg in 0..2 {
+    let cluster_count = spec.games.div_ceil(2);
+    'clusters: for pair_index in (worker_id..cluster_count).step_by(spec.workers) {
+        let first_game_idx = pair_index * 2;
+        let legs = if first_game_idx + 1 < spec.games {
+            [Some(0), Some(1)]
+        } else {
+            [Some(singleton_leg(spec.base_seed, pair_index)), None]
+        };
+        for (offset, leg) in legs.into_iter().flatten().enumerate() {
             if spec.cancel.load(Ordering::Relaxed) {
-                break 'pairs;
+                break 'clusters;
             }
-            let game_idx = pair_idx * 2 + leg;
+            let game_idx = first_game_idx + offset;
             engine_a.new_game().map_err(|error| {
                 format!(
                     "worker {worker} game {} new_game(A) failed: {error}",
@@ -85,7 +95,7 @@ fn run_worker(
                     game_idx + 1
                 )
             })?;
-            let mut dice_gen = FastrandDice::with_seed(seed_for_game(spec.base_seed, pair_idx));
+            let mut dice_gen = FastrandDice::with_seed(seed_for_game(spec.base_seed, pair_index));
             let result = play_game(
                 spec.variant,
                 spec.max_plies,
@@ -93,9 +103,15 @@ fn run_worker(
                 &mut engine_a,
                 &mut engine_b,
                 leg == 0,
+                spec.record_transcripts,
             )
             .map_err(|error| format!("worker {worker} game {} failed: {error}", game_idx + 1))?;
-            let _ = tx.send(WorkerMessage::Game { game_idx, result });
+            let _ = tx.send(WorkerMessage::Game {
+                game_idx,
+                pair_index,
+                leg,
+                result,
+            });
         }
     }
 

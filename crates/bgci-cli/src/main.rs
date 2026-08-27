@@ -18,11 +18,11 @@ struct CliArgs {
 
 #[derive(Debug, Subcommand)]
 enum Commands {
-    /// Run a mirrored two-engine benchmark, optionally saving it.
+    /// Run a two-profile benchmark, optionally saving it.
     Duel(DuelArgs),
     /// Run and save a round-robin multi-engine benchmark.
     League(LeagueArgs),
-    /// Adaptively rank an engine pool over repeated mirrored batches.
+    /// Adaptively rank a profile pool over repeated game batches.
     Rank(RankArgs),
     /// Inspect all saved bgci runs, including rankings.
     History(HistoryArgs),

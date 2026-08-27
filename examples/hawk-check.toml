@@ -1,10 +1,8 @@
 variant = "backgammon"
-pairs = 1
+games = 2
 
 [engine_a]
-name = "hawk"
-engine = "hawk"
+profile = "hawk"
 
 [engine_b]
-name = "random"
-engine = "random"
+profile = "random"

@@ -30,7 +30,7 @@ enum RankCommand {
     Run(RunArgs),
     /// Add provisional engines to a paused ranking pool.
     Add(AddArgs),
-    /// Refresh display metadata from the current engine registry.
+    /// Refresh display metadata from the current profiles.
     Refresh(RefreshArgs),
     /// Recompute and display a named ranking pool.
     Show(PoolArgs),
@@ -44,11 +44,11 @@ struct CreateArgs {
     #[arg(default_value = "main")]
     name: String,
 
-    /// Initial engine aliases or option-qualified specifications.
+    /// Initial profile aliases or option-qualified engine specifications.
     #[arg(long, num_args = 2..)]
     engines: Vec<String>,
 
-    /// Base seed used to derive deterministic batch and pair seeds.
+    /// Base seed used to derive deterministic batch and game-group seeds.
     #[arg(long, default_value_t = 42)]
     seed: u64,
 
@@ -64,9 +64,9 @@ struct CreateArgs {
     #[arg(long, default_value_t = 3)]
     placement_opponents: usize,
 
-    /// Pairs required against each placement opponent.
-    #[arg(long, default_value_t = 20)]
-    placement_pairs: usize,
+    /// Games required against each placement opponent.
+    #[arg(long, default_value_t = 40)]
+    placement_games: usize,
 
     /// Maximum approximate RD for established status.
     #[arg(long, default_value_t = 80.0)]
@@ -113,20 +113,20 @@ struct RefreshArgs {
 
     /// Persist newly explicit UBGI defaults without changing existing values.
     #[arg(long)]
-    apply_options: bool,
+    apply_ubgi: bool,
 }
 
 #[derive(Debug, Clone, Args)]
 struct SessionArgs {
-    /// Additional pairs to run in this session; omit to run until Ctrl-C.
+    /// Additional games to run in this session; omit to run until Ctrl-C.
     #[arg(long)]
-    budget_pairs: Option<usize>,
+    budget_games: Option<usize>,
 
-    /// Mirrored pairs in each adaptively selected batch.
-    #[arg(long, default_value_t = 10)]
-    batch_pairs: usize,
+    /// Games in each adaptively selected batch.
+    #[arg(long, default_value_t = 20)]
+    batch_games: usize,
 
-    /// Number of pair workers to run concurrently.
+    /// Number of mirrored game groups to run concurrently.
     #[arg(long, default_value_t = 1)]
     parallel: usize,
 }
@@ -137,8 +137,8 @@ pub async fn run(args: RankArgs) -> Result<(), String> {
     match args.command {
         RankCommand::Create(args) => {
             let variant = parse_variant(&args.variant)?;
-            if args.placement_opponents == 0 || args.placement_pairs == 0 {
-                return Err("placement opponents and pairs must be greater than zero".to_string());
+            if args.placement_opponents == 0 || args.placement_games == 0 {
+                return Err("placement opponents and games must be greater than zero".to_string());
             }
             if !args.established_rd.is_finite() || args.established_rd <= 0.0 {
                 return Err("--established-rd must be a positive number".to_string());
@@ -151,7 +151,7 @@ pub async fn run(args: RankArgs) -> Result<(), String> {
                     seed: args.seed,
                     max_plies: args.max_plies,
                     placement_opponents: args.placement_opponents,
-                    placement_pairs: args.placement_pairs,
+                    placement_games: args.placement_games,
                     established_rd: args.established_rd,
                 },
                 &engines,
@@ -186,7 +186,7 @@ pub async fn run(args: RankArgs) -> Result<(), String> {
                 .collect::<Vec<_>>();
             let engines = resolve_and_finalize_engines(&specs)?;
             let pool =
-                store.refresh_ranking_engine_metadata(&args.name, &engines, args.apply_options)?;
+                store.refresh_ranking_engine_metadata(&args.name, &engines, args.apply_ubgi)?;
             println!("refreshed metadata for ranking '{}'", pool.name);
             show_ranking(&store, &pool, false)
         }
@@ -199,11 +199,11 @@ pub async fn run(args: RankArgs) -> Result<(), String> {
             if rankings.is_empty() {
                 println!("no ranking pools");
             } else {
-                println!("name                           status       pairs   games");
+                println!("name                           status       games");
                 for ranking in rankings {
                     println!(
-                        "{:<30} {:<10} {:>7} {:>7}",
-                        ranking.name, ranking.status, ranking.completed_pairs, ranking.games
+                        "{:<30} {:<10} {:>7}",
+                        ranking.name, ranking.status, ranking.games
                     );
                 }
             }
@@ -226,21 +226,21 @@ async fn run_pool(
             eprintln!("Ctrl-C received; pausing after the current batch");
         }
     });
-    let mut session_pairs = 0usize;
+    let mut session_games = 0usize;
 
     let result = loop {
         if stop.load(Ordering::Relaxed) {
             break pause(store, &pool.name, pool.id, None);
         }
-        let batch_pairs = match session.budget_pairs {
+        let batch_games = match session.budget_games {
             Some(budget) => {
-                let remaining = budget.saturating_sub(session_pairs);
+                let remaining = budget.saturating_sub(session_games);
                 if remaining == 0 {
                     break pause(store, &pool.name, pool.id, None);
                 }
-                session.batch_pairs.min(remaining)
+                session.batch_games.min(remaining)
             }
-            None => session.batch_pairs,
+            None => session.batch_games,
         };
 
         let data = match store.ranking_data(&pool) {
@@ -250,12 +250,12 @@ async fn run_pool(
         let model = fit_rating_model(pool.engines.len(), &data.edges);
         let Some((engine_a, engine_b)) = select_pair_for_model(
             &model,
-            &data.pair_counts,
+            &data.game_counts,
             &data.average_decision_time,
             &data.last_played_batch,
             pool.next_batch,
             pool.placement_opponents,
-            pool.placement_pairs,
+            pool.placement_games,
         ) else {
             break pause(
                 store,
@@ -265,18 +265,18 @@ async fn run_pool(
             );
         };
         println!(
-            "batch {}: {} vs {} ({} pairs)",
+            "batch {}: {} vs {} ({} games)",
             pool.next_batch + 1,
             pool.engines[engine_a].config.name,
             pool.engines[engine_b].config.name,
-            batch_pairs
+            batch_games
         );
-        let matchup = match store.start_ranking_batch(&pool, engine_a, engine_b, batch_pairs) {
+        let matchup = match store.start_ranking_batch(&pool, engine_a, engine_b, batch_games) {
             Ok(matchup) => matchup,
             Err(error) => break pause(store, &pool.name, pool.id, Some(error)),
         };
         let config = ResolvedMatchup {
-            pairs: batch_pairs,
+            games: batch_games,
             parallel: session.parallel,
             seed: matchup.seed(),
             max_plies: pool.max_plies,
@@ -296,7 +296,7 @@ async fn run_pool(
             break pause(store, &pool.name, pool.id, Some(error));
         }
         pool.next_batch += 1;
-        session_pairs += batch_pairs;
+        session_games += batch_games;
         if let Err(error) = show_ranking(store, &pool, false) {
             break pause(store, &pool.name, pool.id, Some(error));
         }
@@ -322,9 +322,9 @@ fn show_ranking(store: &Database, pool: &RankingPool, diagnostics: bool) -> Resu
         let engine = &pool.engines[rating.index];
         let provisional = is_provisional(
             rating,
-            &data.pair_counts,
+            &data.game_counts,
             pool.placement_opponents,
-            pool.placement_pairs,
+            pool.placement_games,
             pool.established_rd,
         );
         has_provisional |= provisional;
@@ -411,11 +411,11 @@ fn show_ranking(store: &Database, pool: &RankingPool, diagnostics: bool) -> Resu
 }
 
 fn validate_session(args: &SessionArgs) -> Result<(), String> {
-    if args.batch_pairs == 0 {
-        return Err("--batch-pairs must be greater than zero".to_string());
+    if args.batch_games == 0 {
+        return Err("--batch-games must be greater than zero".to_string());
     }
-    if args.budget_pairs == Some(0) {
-        return Err("--budget-pairs must be greater than zero when supplied".to_string());
+    if args.budget_games == Some(0) {
+        return Err("--budget-games must be greater than zero when supplied".to_string());
     }
     Ok(())
 }

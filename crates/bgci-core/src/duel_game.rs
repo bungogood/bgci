@@ -7,6 +7,19 @@ use bkgm::{Game, GameState, Variant, normalize_move_text};
 
 use crate::engine::EngineProcess;
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Participant {
+    A,
+    B,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TurnRecord {
+    pub participant: Participant,
+    pub dice: (u8, u8),
+    pub move_text: String,
+}
+
 pub(crate) struct DuelGameResult {
     pub(crate) winner_x: Option<bool>,
     pub(crate) points_x: f32,
@@ -16,6 +29,7 @@ pub(crate) struct DuelGameResult {
     pub(crate) b_decisions: usize,
     pub(crate) a_decision_time: Duration,
     pub(crate) b_decision_time: Duration,
+    pub(crate) transcript: Option<Vec<TurnRecord>>,
 }
 
 pub(crate) fn seed_for_game(base_seed: u64, game_idx: usize) -> u64 {
@@ -25,6 +39,11 @@ pub(crate) fn seed_for_game(base_seed: u64, game_idx: usize) -> u64 {
     z ^ (z >> 31)
 }
 
+pub(crate) fn singleton_leg(base_seed: u64, pair_index: usize) -> usize {
+    const SINGLETON_LEG_DOMAIN: u64 = 0x5349_4E47_4C45_544F;
+    (seed_for_game(base_seed ^ SINGLETON_LEG_DOMAIN, pair_index) & 1) as usize
+}
+
 pub(crate) fn play_game(
     variant: Variant,
     max_plies: usize,
@@ -32,12 +51,14 @@ pub(crate) fn play_game(
     engine_a: &mut EngineProcess,
     engine_b: &mut EngineProcess,
     a_is_x: bool,
+    record_transcript: bool,
 ) -> Result<DuelGameResult, String> {
     let mut game = Game::new(variant);
     let mut a_decisions = 0usize;
     let mut b_decisions = 0usize;
     let mut a_decision_time = Duration::ZERO;
     let mut b_decision_time = Duration::ZERO;
+    let mut transcript = record_transcript.then(Vec::new);
 
     for ply in 0..max_plies {
         let dice = if ply == 0 {
@@ -56,6 +77,7 @@ pub(crate) fn play_game(
                 b_decisions,
                 a_decision_time,
                 b_decision_time,
+                transcript,
             });
         }
         let position_id = gnuid::encode(game.position());
@@ -119,6 +141,22 @@ pub(crate) fn play_game(
             ));
         }
 
+        if let Some(transcript) = &mut transcript {
+            let move_text = game
+                .position()
+                .encode_move(next, dice)
+                .map_err(|error| format!("failed to encode validated move: {error}"))?;
+            transcript.push(TurnRecord {
+                participant: if a_to_move {
+                    Participant::A
+                } else {
+                    Participant::B
+                },
+                dice: (d1.max(d2) as u8, d1.min(d2) as u8),
+                move_text,
+            });
+        }
+
         game.set_position(next)
             .map_err(|e| format!("failed to set position: {e}"))?;
 
@@ -139,6 +177,7 @@ pub(crate) fn play_game(
                 b_decisions,
                 a_decision_time,
                 b_decision_time,
+                transcript,
             });
         }
     }
@@ -152,5 +191,22 @@ pub(crate) fn play_game(
         b_decisions,
         a_decision_time,
         b_decision_time,
+        transcript,
     })
+}
+
+#[cfg(test)]
+mod seed_tests {
+    use super::{seed_for_game, singleton_leg};
+
+    #[test]
+    fn singleton_leg_is_deterministic_domain_separated_and_not_side_fixed() {
+        assert_eq!(singleton_leg(42, 3), singleton_leg(42, 3));
+        let legs = (0..64)
+            .map(|seed| singleton_leg(seed, 0))
+            .collect::<Vec<_>>();
+        assert!(legs.contains(&0));
+        assert!(legs.contains(&1));
+        assert_eq!(seed_for_game(42, 0), seed_for_game(42, 0));
+    }
 }

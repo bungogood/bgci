@@ -10,10 +10,10 @@ use crate::duel_game::seed_for_game;
 use crate::duel_runner::GameRecord;
 use crate::ranking::RankingEdge;
 
-const SCHEMA_VERSION: i64 = 1;
+const SCHEMA_VERSION: i64 = 2;
 const BENCHMARK_SUMMARY_PROJECTION: &str =
-    "SELECT b.id, b.name, b.kind, b.status, b.variant, b.requested_pairs,
-            COUNT(g.id) / 2, COUNT(g.id)
+    "SELECT b.id, b.name, b.kind, b.status, b.variant, b.requested_games,
+            COUNT(g.id)
      FROM benchmarks b
      LEFT JOIN matchups m ON m.benchmark_id = b.id
      LEFT JOIN games g ON g.matchup_id = m.id";
@@ -42,8 +42,7 @@ pub struct BenchmarkSummary {
     pub kind: String,
     pub status: String,
     pub variant: String,
-    pub requested_pairs: usize,
-    pub completed_pairs: usize,
+    pub requested_games: usize,
     pub games: usize,
 }
 
@@ -60,7 +59,7 @@ pub struct EngineSummary {
 #[derive(Clone, Copy, Debug)]
 pub struct MatchupHandle {
     id: i64,
-    pairs: usize,
+    games: usize,
     seed: u64,
 }
 
@@ -87,7 +86,7 @@ pub struct BenchmarkSpec<'a> {
     pub variant: &'a str,
     pub seed: u64,
     pub max_plies: usize,
-    pub pairs: usize,
+    pub games: usize,
 }
 
 pub struct RankingSpec<'a> {
@@ -96,7 +95,7 @@ pub struct RankingSpec<'a> {
     pub seed: u64,
     pub max_plies: usize,
     pub placement_opponents: usize,
-    pub placement_pairs: usize,
+    pub placement_games: usize,
     pub established_rd: f64,
 }
 
@@ -115,14 +114,14 @@ pub struct RankingPool {
     pub max_plies: usize,
     pub next_batch: usize,
     pub placement_opponents: usize,
-    pub placement_pairs: usize,
+    pub placement_games: usize,
     pub established_rd: f64,
     pub engines: Vec<RankingEngine>,
 }
 
 pub struct RankingData {
     pub edges: Vec<RankingEdge>,
-    pub pair_counts: Vec<Vec<usize>>,
+    pub game_counts: Vec<Vec<usize>>,
     pub average_decision_time: Vec<Option<Duration>>,
     pub last_played_batch: Vec<Option<usize>>,
 }
@@ -176,7 +175,7 @@ impl Database {
             spec.variant,
             spec.seed,
             spec.max_plies,
-            spec.pairs,
+            spec.games,
         )?;
         let engine_a_id = add_engine(&tx, benchmark_id, "engine-a", engine_a)?;
         let engine_b_id = add_engine(&tx, benchmark_id, "engine-b", engine_b)?;
@@ -185,7 +184,7 @@ impl Database {
             benchmark_id,
             engine_a_id,
             engine_b_id,
-            spec.pairs,
+            spec.games,
             spec.seed,
             0,
         )?;
@@ -217,10 +216,10 @@ impl Database {
         }
 
         let matchup_count = engines.len() * (engines.len() - 1) / 2;
-        let requested_pairs = spec
-            .pairs
+        let requested_games = spec
+            .games
             .checked_mul(matchup_count)
-            .ok_or_else(|| "league pair count is too large".to_string())?;
+            .ok_or_else(|| "league game count is too large".to_string())?;
         let tx = self
             .conn
             .transaction()
@@ -232,7 +231,7 @@ impl Database {
             spec.variant,
             spec.seed,
             spec.max_plies,
-            requested_pairs,
+            requested_games,
         )?;
         let mut engine_ids = Vec::with_capacity(engines.len());
         for engine in engines {
@@ -247,7 +246,7 @@ impl Database {
                     benchmark_id,
                     engine_ids[a],
                     engine_ids[b],
-                    spec.pairs,
+                    spec.games,
                     matchup_seed,
                     matchups.len(),
                 )?;
@@ -300,11 +299,11 @@ impl Database {
         tx.execute(
             "UPDATE benchmarks
              SET status = 'paused', completed_at = CURRENT_TIMESTAMP,
-                 placement_opponents = ?, placement_pairs = ?, established_rd = ?
+                  placement_opponents = ?, placement_games = ?, established_rd = ?
              WHERE id = ?",
             params![
                 spec.placement_opponents as i64,
-                spec.placement_pairs as i64,
+                spec.placement_games as i64,
                 spec.established_rd,
                 benchmark_id
             ],
@@ -323,13 +322,13 @@ impl Database {
             seed,
             max_plies,
             placement_opponents,
-            placement_pairs,
+            placement_games,
             established_rd,
         ): (String, String, String, String, i64, i64, i64, f64) = self
             .conn
             .query_row(
                 "SELECT name, status, variant, seed, max_plies,
-                        placement_opponents, placement_pairs, established_rd
+                        placement_opponents, placement_games, established_rd
                  FROM benchmarks WHERE id = ? AND kind = 'ranking'",
                 params![benchmark_id],
                 |row| {
@@ -352,8 +351,8 @@ impl Database {
         let mut stmt = self
             .conn
             .prepare(
-                "SELECT eb.id, be.name, be.family, be.version, be.configuration_json,
-                         eb.command_json, eb.env_json, eb.options_json
+                "SELECT eb.id, be.name, be.family, be.version, be.labels_json,
+                         eb.command_json, eb.env_json, eb.ubgi_json
                  FROM benchmark_engines be
                  JOIN engine_builds eb ON eb.id = be.engine_build_id
                  WHERE be.benchmark_id = ?
@@ -376,10 +375,10 @@ impl Database {
             .map_err(|e| format!("query ranking engines: {e}"))?;
         let mut engines = Vec::new();
         for row in rows {
-            let (build_id, name, family, version, configuration, command, env, options) =
+            let (build_id, name, family, version, labels, command, env, ubgi) =
                 row.map_err(|e| format!("read ranking engine: {e}"))?;
-            let configuration: BTreeMap<String, String> = serde_json::from_str(&configuration)
-                .map_err(|e| format!("parse engine display configuration: {e}"))?;
+            let labels: BTreeMap<String, String> =
+                serde_json::from_str(&labels).map_err(|e| format!("parse engine labels: {e}"))?;
             engines.push(RankingEngine {
                 build_id,
                 config: ResolvedEngine {
@@ -389,13 +388,13 @@ impl Database {
                             .map_err(|e| format!("parse engine command: {e}"))?,
                         serde_json::from_str(&env)
                             .map_err(|e| format!("parse engine environment: {e}"))?,
-                        serde_json::from_str(&options)
-                            .map_err(|e| format!("parse engine options: {e}"))?,
+                        serde_json::from_str(&ubgi)
+                            .map_err(|e| format!("parse engine UBGI settings: {e}"))?,
                     )?,
                     metadata: EngineMetadata {
                         family,
                         version,
-                        configuration,
+                        labels,
                     },
                 },
             });
@@ -417,7 +416,7 @@ impl Database {
             max_plies: max_plies as usize,
             next_batch: next_batch as usize,
             placement_opponents: placement_opponents as usize,
-            placement_pairs: placement_pairs as usize,
+            placement_games: placement_games as usize,
             established_rd,
             engines,
         })
@@ -493,7 +492,7 @@ impl Database {
         &mut self,
         name: &str,
         engines: &[ResolvedEngine],
-        apply_options: bool,
+        apply_ubgi: bool,
     ) -> Result<RankingPool, String> {
         let pool = self.load_ranking_by_name(name)?;
         if pool.status != "paused" {
@@ -515,12 +514,12 @@ impl Database {
             .transaction()
             .map_err(|e| format!("begin refresh ranking metadata transaction: {e}"))?;
         for participant in &pool.engines {
-            let config = if apply_options {
+            let config = if apply_ubgi {
                 let config = configs_by_name
                     .get(participant.config.name.as_str())
                     .ok_or_else(|| {
                         format!(
-                            "no current configuration found for engine {}",
+                            "no current profile found for engine {}",
                             participant.config.name
                         )
                     })?;
@@ -535,9 +534,9 @@ impl Database {
                 if participant
                     .config
                     .launch
-                    .options()
+                    .ubgi()
                     .iter()
-                    .any(|(key, value)| config.launch.options().get(key) != Some(value))
+                    .any(|(key, value)| config.launch.ubgi().get(key) != Some(value))
                 {
                     return Err(format!(
                         "refusing to change an existing UBGI option for engine {}",
@@ -554,9 +553,9 @@ impl Database {
                     )
                 })?
             };
-            let configuration = serde_json::to_string(&config.metadata.configuration)
-                .map_err(|e| format!("serialize engine display configuration: {e}"))?;
-            let build_id = if apply_options {
+            let labels = serde_json::to_string(&config.metadata.labels)
+                .map_err(|e| format!("serialize engine labels: {e}"))?;
+            let build_id = if apply_ubgi {
                 let build_id = ensure_engine_build(&tx, config)?;
                 if build_id != participant.build_id {
                     replace_ranking_build(&tx, pool.id, participant.build_id, build_id)?;
@@ -567,13 +566,13 @@ impl Database {
             };
             tx.execute(
                 "UPDATE benchmark_engines
-                 SET name = ?, family = ?, version = ?, configuration_json = ?
+                 SET name = ?, family = ?, version = ?, labels_json = ?
                  WHERE benchmark_id = ? AND engine_build_id = ? AND role = 'member'",
                 params![
                     config.name,
                     config.metadata.family.as_deref(),
                     config.metadata.version.as_deref(),
-                    configuration,
+                    labels,
                     pool.id,
                     build_id,
                 ],
@@ -620,7 +619,7 @@ impl Database {
         pool: &RankingPool,
         engine_a: usize,
         engine_b: usize,
-        pairs: usize,
+        games: usize,
     ) -> Result<MatchupHandle, String> {
         if pool.status != "running" {
             return Err(format!("ranking {} is not running", pool.id));
@@ -629,8 +628,8 @@ impl Database {
         {
             return Err("invalid ranking matchup engines".to_string());
         }
-        if pairs == 0 {
-            return Err("ranking batch must contain at least one pair".to_string());
+        if games == 0 {
+            return Err("ranking batch must contain at least one game".to_string());
         }
         let seed = seed_for_game(pool.seed, pool.next_batch);
         let tx = self
@@ -642,7 +641,7 @@ impl Database {
             pool.id,
             pool.engines[engine_a].build_id,
             pool.engines[engine_b].build_id,
-            pairs,
+            games,
             seed,
             pool.next_batch,
         )?;
@@ -678,14 +677,15 @@ impl Database {
             .enumerate()
             .map(|(index, engine)| (engine.build_id, index))
             .collect::<HashMap<_, _>>();
-        let mut pair_counts = vec![vec![0; pool.engines.len()]; pool.engines.len()];
+        let mut game_counts = vec![vec![0; pool.engines.len()]; pool.engines.len()];
         let mut edge_stmt = self
             .conn
             .prepare(
                 "WITH pair_stats AS (
                    SELECT MIN(m.engine_a_id, m.engine_b_id) AS engine_lo_id,
                           MAX(m.engine_a_id, m.engine_b_id) AS engine_hi_id,
-                          m.id AS matchup_id, g.pair_index,
+                           m.id AS matchup_id, g.pair_index,
+                           COUNT(*) AS physical_games,
                            SUM(g.points_a != 0) AS decisive_games,
                            SUM(CASE WHEN g.points_a != 0 THEN
                              0.5 + CASE WHEN m.engine_a_id < m.engine_b_id
@@ -695,10 +695,10 @@ impl Database {
                    JOIN games g ON g.matchup_id = m.id
                    WHERE m.benchmark_id = ?
                    GROUP BY engine_lo_id, engine_hi_id, m.id, g.pair_index
-                   HAVING COUNT(*) = 2
                  )
-                 SELECT engine_lo_id, engine_hi_id, COUNT(*), SUM(decisive_games),
-                        SUM(score_sum_lo), SUM(decisive_games * decisive_games),
+                 SELECT engine_lo_id, engine_hi_id, SUM(decisive_games > 0), SUM(physical_games),
+                        SUM(decisive_games),
+                         SUM(score_sum_lo), SUM(decisive_games * decisive_games),
                         SUM(decisive_games * score_sum_lo),
                         SUM(score_sum_lo * score_sum_lo)
                  FROM pair_stats
@@ -713,26 +713,27 @@ impl Database {
                     row.get::<_, i64>(1)?,
                     row.get::<_, i64>(2)?,
                     row.get::<_, i64>(3)?,
-                    row.get::<_, f64>(4)?,
+                    row.get::<_, i64>(4)?,
                     row.get::<_, f64>(5)?,
                     row.get::<_, f64>(6)?,
                     row.get::<_, f64>(7)?,
+                    row.get::<_, f64>(8)?,
                 ))
             })
             .map_err(|e| format!("query ranking edges: {e}"))?;
         let mut edges = Vec::new();
         for row in edge_rows {
-            let (lo_id, hi_id, pairs, games, score, m2, m_score, score2) =
+            let (lo_id, hi_id, clusters, physical_games, rated_games, score, m2, m_score, score2) =
                 row.map_err(|e| format!("read ranking edge: {e}"))?;
             if let (Some(&lo), Some(&hi)) = (index_by_build.get(&lo_id), index_by_build.get(&hi_id))
             {
-                pair_counts[lo][hi] = pairs as usize;
-                pair_counts[hi][lo] = pairs as usize;
+                game_counts[lo][hi] = physical_games as usize;
+                game_counts[hi][lo] = physical_games as usize;
                 edges.push(RankingEdge {
                     engine_a: lo,
                     engine_b: hi,
-                    completed_pairs: pairs as usize,
-                    rated_games: games as usize,
+                    completed_clusters: clusters as usize,
+                    rated_games: rated_games as usize,
                     score_sum_a: score,
                     sum_m_squared: m2,
                     sum_m_score: m_score,
@@ -789,7 +790,7 @@ impl Database {
             .collect();
         Ok(RankingData {
             edges,
-            pair_counts,
+            game_counts,
             average_decision_time,
             last_played_batch,
         })
@@ -819,8 +820,8 @@ impl Database {
                      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 params![
                     matchup.id,
-                    (game.game_idx / 2) as i64,
-                    (game.game_idx % 2) as i64,
+                    game.pair_index as i64,
+                    game.leg as i64,
                     game.points_a,
                     game.plies as i64,
                     decisions_a as i64,
@@ -840,7 +841,7 @@ impl Database {
             .execute(
                 "UPDATE benchmarks SET status = 'completed', completed_at = CURRENT_TIMESTAMP
                  WHERE id = ? AND status = 'running'
-                    AND requested_pairs * 2 = (
+                     AND requested_games = (
                       SELECT COUNT(*) FROM games g
                       JOIN matchups m ON m.id = g.matchup_id
                       WHERE m.benchmark_id = benchmarks.id
@@ -850,7 +851,7 @@ impl Database {
             .map_err(|e| format!("finish benchmark: {e}"))?;
         if changed == 0 {
             return Err(format!(
-                "benchmark {benchmark_id} cannot complete before all requested pairs are stored"
+                "benchmark {benchmark_id} cannot complete before all requested games are stored"
             ));
         }
         Ok(())
@@ -957,9 +958,8 @@ fn decode_benchmark_summary(row: &Row<'_>) -> rusqlite::Result<BenchmarkSummary>
         kind: row.get(2)?,
         status: row.get(3)?,
         variant: row.get(4)?,
-        requested_pairs: row.get::<_, i64>(5)? as usize,
-        completed_pairs: row.get::<_, i64>(6)? as usize,
-        games: row.get::<_, i64>(7)? as usize,
+        requested_games: row.get::<_, i64>(5)? as usize,
+        games: row.get::<_, i64>(6)? as usize,
     })
 }
 
@@ -970,17 +970,17 @@ fn insert_benchmark(
     variant: &str,
     seed: u64,
     max_plies: usize,
-    requested_pairs: usize,
+    requested_games: usize,
 ) -> Result<i64, String> {
     if name.trim().is_empty() {
         return Err("benchmark name must not be empty".to_string());
     }
-    if requested_pairs == 0 && kind != BenchmarkKind::Ranking {
-        return Err("benchmark must request at least one pair".to_string());
+    if requested_games == 0 && kind != BenchmarkKind::Ranking {
+        return Err("benchmark must request at least one game".to_string());
     }
     tx.execute(
         "INSERT INTO benchmarks(
-            name, kind, status, variant, seed, max_plies, requested_pairs
+            name, kind, status, variant, seed, max_plies, requested_games
          ) VALUES (?, ?, 'running', ?, ?, ?, ?)",
         params![
             name.trim(),
@@ -988,7 +988,7 @@ fn insert_benchmark(
             variant,
             seed.to_string(),
             max_plies as i64,
-            requested_pairs as i64
+            requested_games as i64
         ],
     )
     .map_err(|e| format!("create benchmark: {e}"))?;
@@ -1002,11 +1002,11 @@ fn add_engine(
     config: &ResolvedEngine,
 ) -> Result<i64, String> {
     let build_id = ensure_engine_build(tx, config)?;
-    let configuration = serde_json::to_string(&config.metadata.configuration)
-        .map_err(|e| format!("serialize engine display configuration: {e}"))?;
+    let labels = serde_json::to_string(&config.metadata.labels)
+        .map_err(|e| format!("serialize engine labels: {e}"))?;
     tx.execute(
         "INSERT INTO benchmark_engines(
-             benchmark_id, engine_build_id, role, name, family, version, configuration_json
+             benchmark_id, engine_build_id, role, name, family, version, labels_json
          ) VALUES (?, ?, ?, ?, ?, ?, ?)",
         params![
             benchmark_id,
@@ -1025,7 +1025,7 @@ fn add_engine(
                 .as_deref()
                 .map(str::trim)
                 .filter(|v| !v.is_empty()),
-            configuration
+            labels
         ],
     )
     .map_err(|e| format!("add benchmark engine: {e}"))?;
@@ -1038,13 +1038,13 @@ fn ensure_engine_build(tx: &Transaction<'_>, config: &ResolvedEngine) -> Result<
         .map_err(|e| format!("serialize engine command: {e}"))?;
     let env = serde_json::to_string(config.launch.env())
         .map_err(|e| format!("serialize engine environment: {e}"))?;
-    let options = serde_json::to_string(config.launch.options())
-        .map_err(|e| format!("serialize engine options: {e}"))?;
+    let ubgi = serde_json::to_string(config.launch.ubgi())
+        .map_err(|e| format!("serialize engine UBGI settings: {e}"))?;
     tx.execute(
-        "INSERT INTO engine_builds(identity, command_json, env_json, options_json)
+        "INSERT INTO engine_builds(identity, command_json, env_json, ubgi_json)
          VALUES (?, ?, ?, ?)
          ON CONFLICT(identity) DO NOTHING",
-        params![identity, command, env, options],
+        params![identity, command, env, ubgi],
     )
     .map_err(|e| format!("insert engine build: {e}"))?;
     let build_id: i64 = tx
@@ -1074,7 +1074,7 @@ fn replace_ranking_build(
         )
         .map_err(|e| format!("check replacement ranking build: {e}"))?;
     if duplicate {
-        return Err("refreshed options duplicate another engine in the ranking".to_string());
+        return Err("refreshed UBGI settings duplicate another engine in the ranking".to_string());
     }
 
     for column in ["engine_a_id", "engine_b_id"] {
@@ -1106,19 +1106,19 @@ fn add_matchup(
     benchmark_id: i64,
     engine_a_id: i64,
     engine_b_id: i64,
-    pairs: usize,
+    games: usize,
     seed: u64,
     batch_index: usize,
 ) -> Result<MatchupHandle, String> {
     tx.execute(
         "INSERT INTO matchups(
-            benchmark_id, engine_a_id, engine_b_id, requested_pairs, seed, batch_index
+            benchmark_id, engine_a_id, engine_b_id, requested_games, seed, batch_index
          ) VALUES (?, ?, ?, ?, ?, ?)",
         params![
             benchmark_id,
             engine_a_id,
             engine_b_id,
-            pairs as i64,
+            games as i64,
             seed.to_string(),
             batch_index as i64
         ],
@@ -1126,16 +1126,13 @@ fn add_matchup(
     .map_err(|e| format!("create matchup: {e}"))?;
     Ok(MatchupHandle {
         id: tx.last_insert_rowid(),
-        pairs,
+        games,
         seed,
     })
 }
 
 fn validate_games(matchup: MatchupHandle, games: &[GameRecord]) -> Result<(), String> {
-    let expected_games = matchup
-        .pairs
-        .checked_mul(2)
-        .ok_or_else(|| "matchup pair count is too large".to_string())?;
+    let expected_games = matchup.games;
     if games.len() != expected_games {
         return Err(format!(
             "matchup {} produced {}/{} games",
@@ -1147,6 +1144,18 @@ fn validate_games(matchup: MatchupHandle, games: &[GameRecord]) -> Result<(), St
     for (index, game) in games.iter().enumerate() {
         if game.game_idx != index {
             return Err(format!("invalid mirrored sequence at game {}", index + 1));
+        }
+        let expected_pair_index = index / 2;
+        let expected_leg = if index + 1 == expected_games && expected_games % 2 == 1 {
+            crate::duel_game::singleton_leg(matchup.seed, expected_pair_index)
+        } else {
+            index % 2
+        };
+        if game.pair_index != expected_pair_index || game.leg != expected_leg {
+            return Err(format!(
+                "invalid scheduled cluster/leg at game {}",
+                index + 1
+            ));
         }
         if !game.points_a.is_finite()
             || ![-3.0, -2.0, -1.0, 0.0, 1.0, 2.0, 3.0].contains(&game.points_a)
@@ -1172,7 +1181,7 @@ fn initialize_schema(conn: &Connection) -> Result<(), String> {
                 identity TEXT NOT NULL UNIQUE,
                 command_json TEXT NOT NULL,
                env_json TEXT NOT NULL,
-               options_json TEXT NOT NULL,
+               ubgi_json TEXT NOT NULL,
                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
              );
              CREATE TABLE benchmarks (
@@ -1183,9 +1192,9 @@ fn initialize_schema(conn: &Connection) -> Result<(), String> {
                variant TEXT NOT NULL,
                seed TEXT NOT NULL,
                max_plies INTEGER NOT NULL CHECK(max_plies > 0),
-               requested_pairs INTEGER NOT NULL CHECK(requested_pairs >= 0),
+                requested_games INTEGER NOT NULL CHECK(requested_games >= 0),
                placement_opponents INTEGER,
-               placement_pairs INTEGER,
+                placement_games INTEGER,
                established_rd REAL,
                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
                completed_at TEXT
@@ -1199,7 +1208,7 @@ fn initialize_schema(conn: &Connection) -> Result<(), String> {
                 name TEXT NOT NULL,
                 family TEXT,
                version TEXT,
-               configuration_json TEXT NOT NULL DEFAULT '{}',
+               labels_json TEXT NOT NULL DEFAULT '{}',
                PRIMARY KEY(benchmark_id, role, engine_build_id)
              );
              CREATE TABLE matchups (
@@ -1207,7 +1216,7 @@ fn initialize_schema(conn: &Connection) -> Result<(), String> {
                benchmark_id INTEGER NOT NULL REFERENCES benchmarks(id),
                engine_a_id INTEGER NOT NULL REFERENCES engine_builds(id),
                engine_b_id INTEGER NOT NULL REFERENCES engine_builds(id),
-               requested_pairs INTEGER NOT NULL CHECK(requested_pairs > 0),
+                requested_games INTEGER NOT NULL CHECK(requested_games > 0),
                seed TEXT NOT NULL,
                batch_index INTEGER NOT NULL,
                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
@@ -1226,7 +1235,7 @@ fn initialize_schema(conn: &Connection) -> Result<(), String> {
                  decision_seconds_b REAL NOT NULL CHECK(decision_seconds_b >= 0),
                  UNIQUE(matchup_id, pair_index, leg)
                );
-              PRAGMA user_version = 1;
+               PRAGMA user_version = 2;
               COMMIT;",
         )
         .map_err(|e| format!("create database schema: {e}"))?;
@@ -1267,26 +1276,41 @@ mod tests {
         }
     }
 
-    fn spec(pairs: usize) -> BenchmarkSpec<'static> {
+    fn spec(games: usize) -> BenchmarkSpec<'static> {
         BenchmarkSpec {
             name: "benchmark",
             variant: "backgammon",
             seed: 42,
             max_plies: 512,
-            pairs,
+            games,
         }
     }
 
     fn game(game_idx: usize) -> GameRecord {
         GameRecord {
             game_idx,
+            pair_index: game_idx / 2,
+            leg: game_idx % 2,
             points_a: 1.0,
             plies: 10,
             a_decisions: 5,
             b_decisions: 5,
             a_decision_time: Duration::from_millis(50),
             b_decision_time: Duration::from_millis(100),
+            transcript: None,
         }
+    }
+
+    fn scheduled_games(count: usize, seed: u64) -> Vec<GameRecord> {
+        (0..count)
+            .map(|game_idx| {
+                let mut game = game(game_idx);
+                if game_idx + 1 == count && count % 2 == 1 {
+                    game.leg = crate::duel_game::singleton_leg(seed, game.pair_index);
+                }
+                game
+            })
+            .collect()
     }
 
     fn database() -> Database {
@@ -1300,7 +1324,7 @@ mod tests {
             seed: 42,
             max_plies: 512,
             placement_opponents: 1,
-            placement_pairs: 1,
+            placement_games: 2,
             established_rd: 80.0,
         }
     }
@@ -1355,9 +1379,9 @@ mod tests {
         engine_a.metadata.version = Some("v2".to_string());
         engine_a
             .metadata
-            .configuration
+            .labels
             .insert("model".to_string(), "large".to_string());
-        let started = store.start_duel(spec(1), &engine_a, &config("b")).unwrap();
+        let started = store.start_duel(spec(2), &engine_a, &config("b")).unwrap();
 
         assert!(store.finish_benchmark(started.id).is_err());
         let mut second = game(1);
@@ -1372,14 +1396,7 @@ mod tests {
         assert_eq!(summary.kind, "duel");
         assert_eq!(summary.variant, "backgammon");
         assert_eq!(summary.status, "completed");
-        assert_eq!(
-            (
-                summary.requested_pairs,
-                summary.completed_pairs,
-                summary.games
-            ),
-            (1, 1, 2)
-        );
+        assert_eq!((summary.requested_games, summary.games), (2, 2));
         let legs = store
             .conn
             .prepare("SELECT pair_index, leg, points_a FROM games ORDER BY pair_index, leg")
@@ -1413,7 +1430,7 @@ mod tests {
         let metadata: (Option<String>, String) = store
             .conn
             .query_row(
-                "SELECT version, configuration_json FROM benchmark_engines WHERE name = 'a'",
+                "SELECT version, labels_json FROM benchmark_engines WHERE name = 'a'",
                 [],
                 |row| Ok((row.get(0)?, row.get(1)?)),
             )
@@ -1429,7 +1446,7 @@ mod tests {
     fn game_validation_duplicate_ingestion_and_mid_write_failure_are_atomic() {
         let mut store = database();
         let first = store
-            .start_duel(spec(1), &config("a"), &config("b"))
+            .start_duel(spec(2), &config("a"), &config("b"))
             .unwrap();
         let handle = first.matchups[0].handle;
         let mut wrong_index = game(0);
@@ -1445,7 +1462,7 @@ mod tests {
         assert!(store.record_games(handle, &[game(0), game(1)]).is_err());
 
         let second = store
-            .start_duel(spec(1), &config("a"), &config("b"))
+            .start_duel(spec(2), &config("a"), &config("b"))
             .unwrap();
         store
             .conn
@@ -1471,6 +1488,24 @@ mod tests {
             .unwrap();
         assert_eq!(second_games, 0);
         assert_eq!(row_counts(&store)[4], 2);
+    }
+
+    #[test]
+    fn odd_game_counts_persist_exact_scheduled_singletons() {
+        for count in [1, 3] {
+            let mut store = database();
+            let started = store
+                .start_duel(spec(count), &config("a"), &config("b"))
+                .unwrap();
+            let handle = started.matchups[0].handle;
+            let games = scheduled_games(count, handle.seed());
+            let mut wrong_leg = games.clone();
+            wrong_leg[count - 1].leg ^= 1;
+            assert!(store.record_games(handle, &wrong_leg).is_err());
+            store.record_games(handle, &games).unwrap();
+            store.finish_benchmark(started.id).unwrap();
+            assert_eq!(store.get(started.id).unwrap().unwrap().games, count);
+        }
     }
 
     #[test]
@@ -1545,7 +1580,7 @@ mod tests {
         );
         let summary = store.get(started.id).unwrap().unwrap();
         assert_eq!(
-            (summary.kind.as_str(), summary.requested_pairs),
+            (summary.kind.as_str(), summary.requested_games),
             ("league", 6)
         );
     }
@@ -1568,11 +1603,11 @@ mod tests {
         store.resume_ranking(pool_id).unwrap();
         let pool = store.load_ranking(pool_id).unwrap();
         assert_eq!(pool.status, "running");
-        let empty = store.start_ranking_batch(&pool, 0, 1, 1).unwrap();
+        let empty = store.start_ranking_batch(&pool, 0, 1, 2).unwrap();
         store.discard_empty_matchup(empty).unwrap();
         let retry = store.load_ranking(pool_id).unwrap();
         assert_eq!(retry.next_batch, 0);
-        let matchup = store.start_ranking_batch(&retry, 0, 1, 1).unwrap();
+        let matchup = store.start_ranking_batch(&retry, 0, 1, 2).unwrap();
         store.record_games(matchup, &[game(0), game(1)]).unwrap();
         store.pause_ranking(pool_id).unwrap();
         let expanded = store
@@ -1593,21 +1628,21 @@ mod tests {
             .unwrap();
         store.resume_ranking(created.id).unwrap();
         let pool = store.load_ranking(created.id).unwrap();
-        let matchup = store.start_ranking_batch(&pool, 1, 0, 2).unwrap();
+        let matchup = store.start_ranking_batch(&pool, 1, 0, 3).unwrap();
         store
-            .record_games(matchup, &[game(0), game(1), game(2), game(3)])
+            .record_games(matchup, &scheduled_games(3, matchup.seed()))
             .unwrap();
 
         let data = store.ranking_data(&pool).unwrap();
         let edge = &data.edges[0];
         assert_eq!((edge.engine_a, edge.engine_b), (0, 1));
-        assert_eq!(edge.completed_pairs, 2);
-        assert_eq!(edge.rated_games, 4);
-        assert!((edge.score_sum_a - 4.0 / 3.0).abs() < 1e-12);
-        assert!((edge.sum_m_squared - 8.0).abs() < 1e-12);
-        assert!((edge.sum_m_score - 8.0 / 3.0).abs() < 1e-12);
-        assert!((edge.sum_score_squared - 8.0 / 9.0).abs() < 1e-12);
-        assert_eq!(data.pair_counts, vec![vec![0, 2], vec![2, 0]]);
+        assert_eq!(edge.completed_clusters, 2);
+        assert_eq!(edge.rated_games, 3);
+        assert!((edge.score_sum_a - 1.0).abs() < 1e-12);
+        assert!((edge.sum_m_squared - 5.0).abs() < 1e-12);
+        assert!((edge.sum_m_score - 5.0 / 3.0).abs() < 1e-12);
+        assert!((edge.sum_score_squared - 5.0 / 9.0).abs() < 1e-12);
+        assert_eq!(data.game_counts, vec![vec![0, 3], vec![3, 0]]);
         assert_eq!(
             data.average_decision_time,
             vec![
@@ -1620,15 +1655,34 @@ mod tests {
         assert_eq!(
             select_pair_for_model(
                 &model,
-                &data.pair_counts,
+                &data.game_counts,
                 &data.average_decision_time,
                 &data.last_played_batch,
                 pool.next_batch + 1,
                 pool.placement_opponents,
-                pool.placement_pairs,
+                pool.placement_games,
             ),
             Some((0, 1))
         );
+    }
+
+    #[test]
+    fn ranking_workload_counts_include_incomplete_singletons() {
+        let mut store = database();
+        let created = store
+            .start_ranking(ranking_spec(), &[config("a"), config("b")])
+            .unwrap();
+        store.resume_ranking(created.id).unwrap();
+        let pool = store.load_ranking(created.id).unwrap();
+        let matchup = store.start_ranking_batch(&pool, 0, 1, 1).unwrap();
+        let mut games = scheduled_games(1, matchup.seed());
+        games[0].points_a = 0.0;
+        store.record_games(matchup, &games).unwrap();
+
+        let data = store.ranking_data(&pool).unwrap();
+        assert_eq!(data.game_counts, vec![vec![0, 1], vec![1, 0]]);
+        assert_eq!(data.edges[0].rated_games, 0);
+        assert_eq!(data.edges[0].completed_clusters, 0);
     }
 
     #[test]
@@ -1643,17 +1697,17 @@ mod tests {
         let shared = store
             .start_duel(spec(1), &config("a"), &config("b"))
             .unwrap();
-        let matchup = store.start_ranking_batch(&pool, 0, 1, 1).unwrap();
+        let matchup = store.start_ranking_batch(&pool, 0, 1, 2).unwrap();
         store.record_games(matchup, &[game(0), game(1)]).unwrap();
         store.pause_ranking(pool.id).unwrap();
         let mut a = config("a");
         a.metadata.family = Some("family-a".to_string());
         a.metadata.version = Some("v2".to_string());
         a.metadata
-            .configuration
+            .labels
             .insert("model".to_string(), "large".to_string());
         a.launch
-            .options_mut()
+            .ubgi_mut()
             .insert("engine.ply".to_string(), "1".to_string());
 
         let refreshed = store
@@ -1670,8 +1724,8 @@ mod tests {
             Some("family-a")
         );
         assert_eq!(refreshed_a.config.metadata.version.as_deref(), Some("v2"));
-        assert_eq!(refreshed_a.config.metadata.configuration["model"], "large");
-        assert_eq!(refreshed_a.config.launch.options()["engine.ply"], "1");
+        assert_eq!(refreshed_a.config.metadata.labels["model"], "large");
+        assert_eq!(refreshed_a.config.launch.ubgi()["engine.ply"], "1");
         let shared_a_id: i64 = store
             .conn
             .query_row(
@@ -1681,26 +1735,74 @@ mod tests {
             )
             .unwrap();
         assert_eq!(shared_a_id, old_a_id);
-        let old_options: String = store
+        let old_ubgi: String = store
             .conn
             .query_row(
-                "SELECT options_json FROM engine_builds WHERE id = ?",
+                "SELECT ubgi_json FROM engine_builds WHERE id = ?",
                 params![old_a_id],
                 |row| row.get(0),
             )
             .unwrap();
-        assert_eq!(old_options, "{}");
+        assert_eq!(old_ubgi, "{}");
         let data = store.ranking_data(&refreshed).unwrap();
         assert_eq!((data.edges.len(), data.edges[0].rated_games), (1, 2));
-        assert_eq!(data.pair_counts[0][1], 1);
+        assert_eq!(data.game_counts[0][1], 2);
     }
 
     #[test]
     fn rejects_an_unsupported_schema_version() {
         let conn = Connection::open_in_memory().unwrap();
-        conn.pragma_update(None, "user_version", 2).unwrap();
+        conn.pragma_update(None, "user_version", 1).unwrap();
 
         let error = Database::from_connection(conn).err().unwrap();
-        assert_eq!(error, "database schema 2 is unsupported");
+        assert_eq!(error, "database schema 1 is unsupported");
+    }
+
+    #[test]
+    fn creates_only_version_two_profile_vocabulary_columns() {
+        let store = database();
+        let version: i64 = store
+            .conn
+            .query_row("PRAGMA user_version", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(version, 2);
+
+        for (table, required, rejected) in [
+            (
+                "benchmarks",
+                "requested_games",
+                ["requested_pairs", "placement_pairs"],
+            ),
+            (
+                "matchups",
+                "requested_games",
+                ["requested_pairs", "placement_pairs"],
+            ),
+            (
+                "engine_builds",
+                "ubgi_json",
+                ["options_json", "configuration_json"],
+            ),
+            (
+                "benchmark_engines",
+                "labels_json",
+                ["options_json", "configuration_json"],
+            ),
+        ] {
+            let columns = store
+                .conn
+                .prepare(&format!("PRAGMA table_info({table})"))
+                .unwrap()
+                .query_map([], |row| row.get::<_, String>(1))
+                .unwrap()
+                .collect::<Result<Vec<_>, _>>()
+                .unwrap();
+            assert!(columns.iter().any(|column| column == required));
+            assert!(
+                rejected
+                    .iter()
+                    .all(|name| !columns.iter().any(|column| column == name))
+            );
+        }
     }
 }

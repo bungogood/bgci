@@ -8,7 +8,7 @@ const MAX_RD: f64 = 350.0;
 const MAX_ITERATIONS: usize = 1_000;
 const MAX_IDLE_BATCHES: usize = 20;
 const ACCEPTABLE_MOVE_SECONDS: f64 = 0.05;
-const ROBUST_COVARIANCE_PRIOR_PAIRS: f64 = 30.0;
+const ROBUST_COVARIANCE_PRIOR_CLUSTERS: f64 = 30.0;
 
 /// Aggregated ranking observations for one pair of engines.
 ///
@@ -22,7 +22,7 @@ pub struct RankingEdge {
     pub engine_b: usize,
     pub rated_games: usize,
     pub score_sum_a: f64,
-    pub completed_pairs: usize,
+    pub completed_clusters: usize,
     pub sum_m_squared: f64,
     pub sum_m_score: f64,
     pub sum_score_squared: f64,
@@ -86,7 +86,7 @@ pub struct FitDiagnostics {
 pub struct MatchupResidual {
     pub engine_a: usize,
     pub engine_b: usize,
-    pub pairs: usize,
+    pub clusters: usize,
     pub observed_score: f64,
     pub expected_score: f64,
     pub residual_ppg: f64,
@@ -132,7 +132,7 @@ impl RatingModel {
 pub fn transitivity_diagnostics(
     model: &RatingModel,
     edges: &[RankingEdge],
-    minimum_pairs: usize,
+    minimum_clusters: usize,
 ) -> TransitivityDiagnostics {
     let engine_count = model.ratings.len();
     let mut parent = (0..engine_count).collect::<Vec<_>>();
@@ -141,7 +141,7 @@ pub fn transitivity_diagnostics(
 
     for edge in edges.iter().filter(|edge| {
         valid_edge(engine_count, edge)
-            && edge.completed_pairs >= minimum_pairs
+            && edge.completed_clusters >= minimum_clusters
             && edge.engine_a < model.ratings.len()
             && edge.engine_b < model.ratings.len()
     }) {
@@ -154,8 +154,8 @@ pub fn transitivity_diagnostics(
         let residual = observed - expected;
         let cluster_squared = edge.sum_score_squared - 2.0 * observed * edge.sum_m_score
             + observed * observed * edge.sum_m_squared;
-        let standard_error = if edge.completed_pairs > 1 {
-            let correction = edge.completed_pairs as f64 / (edge.completed_pairs - 1) as f64;
+        let standard_error = if edge.completed_clusters > 1 {
+            let correction = edge.completed_clusters as f64 / (edge.completed_clusters - 1) as f64;
             Some((correction * cluster_squared.max(0.0)).sqrt() / edge.rated_games as f64)
         } else {
             None
@@ -163,7 +163,7 @@ pub fn transitivity_diagnostics(
         residuals.push(MatchupResidual {
             engine_a: edge.engine_a,
             engine_b: edge.engine_b,
-            pairs: edge.completed_pairs,
+            clusters: edge.completed_clusters,
             observed_score: observed,
             expected_score: expected,
             residual_ppg: 6.0 * residual,
@@ -302,11 +302,14 @@ pub fn fit_rating_model(engine_count: usize, edges: &[RankingEdge]) -> RatingMod
         }
         fallback
     });
-    let completed_pairs = edges.iter().map(|edge| edge.completed_pairs).sum::<usize>();
+    let completed_clusters = edges
+        .iter()
+        .map(|edge| edge.completed_clusters)
+        .sum::<usize>();
     let robust_weight =
-        completed_pairs as f64 / (completed_pairs as f64 + ROBUST_COVARIANCE_PRIOR_PAIRS);
-    let cluster_correction = if completed_pairs > 1 {
-        completed_pairs as f64 / (completed_pairs - 1) as f64
+        completed_clusters as f64 / (completed_clusters as f64 + ROBUST_COVARIANCE_PRIOR_CLUSTERS);
+    let cluster_correction = if completed_clusters > 1 {
+        completed_clusters as f64 / (completed_clusters - 1) as f64
     } else {
         1.0
     };
@@ -378,7 +381,7 @@ fn valid_edge(engine_count: usize, edge: &&RankingEdge) -> bool {
         && edge.engine_b < engine_count
         && edge.engine_a != edge.engine_b
         && edge.rated_games > 0
-        && edge.completed_pairs > 0
+        && edge.completed_clusters > 0
         && edge.score_sum_a.is_finite()
         && (0.0..=edge.rated_games as f64).contains(&edge.score_sum_a)
         && edge.sum_m_squared.is_finite()
@@ -608,7 +611,7 @@ fn symmetrize_and_sanitize(matrix: &mut [Vec<f64>]) {
 
 fn select_information_pair(
     model: &RatingModel,
-    pair_counts: &[Vec<usize>],
+    game_counts: &[Vec<usize>],
     average_decision_time: &[Option<Duration>],
     last_played_batch: &[Option<usize>],
     next_batch: usize,
@@ -623,8 +626,8 @@ fn select_information_pair(
     }
 
     let max_index = ratings.iter().map(|rating| rating.index).max()?;
-    if pair_counts.len() <= max_index
-        || pair_counts.iter().any(|row| row.len() <= max_index)
+    if game_counts.len() <= max_index
+        || game_counts.iter().any(|row| row.len() <= max_index)
         || model.covariance.len() <= max_index
         || model.covariance.iter().any(|row| row.len() <= max_index)
         || average_decision_time.len() <= max_index
@@ -643,7 +646,7 @@ fn select_information_pair(
     }
     for (position, left) in ordered.iter().enumerate() {
         for right in &ordered[position + 1..] {
-            if pair_counts[left.index][right.index] != pair_counts[right.index][left.index] {
+            if game_counts[left.index][right.index] != game_counts[right.index][left.index] {
                 return None;
             }
         }
@@ -688,7 +691,7 @@ fn select_information_pair(
             let uncertainty = model.contrast_variance(left.index, right.index);
             let information = probability * (1.0 - probability) * uncertainty;
             let score = information / (engine_cost(left.index) + engine_cost(right.index)).sqrt();
-            let count = pair_counts[left.index][right.index];
+            let count = game_counts[left.index][right.index];
             let candidate = (score, count, left.index, right.index);
             if information_choice.is_none_or(|best| {
                 candidate.0 > best.0
@@ -708,53 +711,53 @@ fn select_information_pair(
 /// Selects placement games or an information-maximizing matchup.
 pub fn select_pair_for_model(
     model: &RatingModel,
-    pair_counts: &[Vec<usize>],
+    game_counts: &[Vec<usize>],
     average_decision_time: &[Option<Duration>],
     last_played_batch: &[Option<usize>],
     next_batch: usize,
     placement_opponents: usize,
-    placement_pairs: usize,
+    placement_games: usize,
 ) -> Option<(usize, usize)> {
     select_pair(
         model,
         SelectionContext {
-            pair_counts,
+            game_counts,
             average_decision_time,
             last_played_batch,
             next_batch,
             placement_opponents,
-            placement_pairs,
+            placement_games,
         },
     )
 }
 
 struct SelectionContext<'a> {
-    pair_counts: &'a [Vec<usize>],
+    game_counts: &'a [Vec<usize>],
     average_decision_time: &'a [Option<Duration>],
     last_played_batch: &'a [Option<usize>],
     next_batch: usize,
     placement_opponents: usize,
-    placement_pairs: usize,
+    placement_games: usize,
 }
 
 fn select_pair(model: &RatingModel, context: SelectionContext<'_>) -> Option<(usize, usize)> {
     let ratings = &model.ratings;
     let SelectionContext {
-        pair_counts,
+        game_counts,
         average_decision_time,
         last_played_batch,
         next_batch,
         placement_opponents,
-        placement_pairs,
+        placement_games,
     } = context;
     let information_choice = select_information_pair(
         model,
-        pair_counts,
+        game_counts,
         average_decision_time,
         last_played_batch,
         next_batch,
     )?;
-    if placement_opponents == 0 || placement_pairs == 0 {
+    if placement_opponents == 0 || placement_games == 0 {
         return Some(information_choice);
     }
     let required_opponents = placement_opponents.min(ratings.len().saturating_sub(1));
@@ -765,10 +768,10 @@ fn select_pair(model: &RatingModel, context: SelectionContext<'_>) -> Option<(us
                 .iter()
                 .filter(|other| {
                     other.index != rating.index
-                        && pair_counts
+                        && game_counts
                             .get(rating.index)
                             .and_then(|row| row.get(other.index))
-                            .is_some_and(|count| *count >= placement_pairs)
+                            .is_some_and(|count| *count >= placement_games)
                 })
                 .count()
         })
@@ -777,8 +780,8 @@ fn select_pair(model: &RatingModel, context: SelectionContext<'_>) -> Option<(us
     let mut choice: Option<(usize, usize, f64, usize, usize)> = None;
     for (left_position, left) in ratings.iter().enumerate() {
         for (right_position, right) in ratings.iter().enumerate().skip(left_position + 1) {
-            let count = *pair_counts.get(left.index)?.get(right.index)?;
-            if count != *pair_counts.get(right.index)?.get(left.index)? || count >= placement_pairs
+            let count = *game_counts.get(left.index)?.get(right.index)?;
+            if count != *game_counts.get(right.index)?.get(left.index)? || count >= placement_games
             {
                 continue;
             }
@@ -819,18 +822,18 @@ fn select_pair(model: &RatingModel, context: SelectionContext<'_>) -> Option<(us
 
 pub fn is_provisional(
     rating: &Rating,
-    pair_counts: &[Vec<usize>],
+    game_counts: &[Vec<usize>],
     placement_opponents: usize,
-    placement_pairs: usize,
+    placement_games: usize,
     established_rd: f64,
 ) -> bool {
-    let required_opponents = placement_opponents.min(pair_counts.len().saturating_sub(1));
-    let opponents = pair_counts
+    let required_opponents = placement_opponents.min(game_counts.len().saturating_sub(1));
+    let opponents = game_counts
         .get(rating.index)
         .map(|row| {
             row.iter()
                 .enumerate()
-                .filter(|(index, count)| *index != rating.index && **count >= placement_pairs)
+                .filter(|(index, count)| *index != rating.index && **count >= placement_games)
                 .count()
         })
         .unwrap_or(0);
@@ -872,7 +875,7 @@ mod tests {
             engine_b: b,
             rated_games: 2 * completed_pairs,
             score_sum_a,
-            completed_pairs,
+            completed_clusters: completed_pairs,
             sum_m_squared: (4 * completed_pairs) as f64,
             sum_m_score: 2.0 * score_sum_a,
             sum_score_squared: (4 * wins + splits) as f64,
@@ -951,7 +954,7 @@ mod tests {
 
         let two_engine = fit_rating_model(2, &[pairs(0, 1, 1, 0, 1)]);
         let prior_precision = ((PRIOR_RD * ELO_TO_LOG_ODDS).powi(2)).recip();
-        let robust_weight = 2.0 / (2.0 + ROBUST_COVARIANCE_PRIOR_PAIRS);
+        let robust_weight = 2.0 / (2.0 + ROBUST_COVARIANCE_PRIOR_CLUSTERS);
         let meat_edge = (1.0 - robust_weight) + robust_weight * 4.0;
         let expected = 2.0 * (prior_precision + 2.0 * meat_edge)
             / (prior_precision + 2.0).powi(2)

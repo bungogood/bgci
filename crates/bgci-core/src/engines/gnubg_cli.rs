@@ -7,7 +7,9 @@ use std::time::{Duration, Instant};
 use bkgm::Game;
 use bkgm::codecs::gnuid;
 use bkgm::dice::Dice;
-use bkgm::ubgi::{UbgiEngine, UbgiError, UbgiMove, parse_ubgi_move, run_ubgi_stdio};
+use bkgm::ubgi::{
+    OptionSpec, OptionValue, UbgiEngine, UbgiError, UbgiMove, parse_ubgi_move, run_ubgi_stdio,
+};
 
 struct GnubgSession {
     child: Child,
@@ -127,6 +129,7 @@ pub(super) fn run(_args: &[String]) -> Result<(), String> {
     let mut adapter = GnubgCliAdapter {
         gnubg_bin: resolve_gnubg_bin(),
         gnubg_pkgdatadir: resolve_gnubg_pkgdatadir(),
+        ply: 3,
         session: None,
     };
     run_ubgi_stdio(&mut adapter);
@@ -139,6 +142,7 @@ pub(super) fn run(_args: &[String]) -> Result<(), String> {
 struct GnubgCliAdapter {
     gnubg_bin: String,
     gnubg_pkgdatadir: Option<String>,
+    ply: i64,
     session: Option<GnubgSession>,
 }
 
@@ -151,13 +155,35 @@ impl UbgiEngine for GnubgCliAdapter {
         "0.3"
     }
 
+    fn options(&self) -> Vec<OptionSpec> {
+        vec![OptionSpec::integer("engine.ply", 1, 8, 3)]
+    }
+
+    fn get(&self, key: &str) -> Option<OptionValue> {
+        (key == "engine.ply").then_some(OptionValue::Int(self.ply))
+    }
+
+    fn set(&mut self, key: &str, value: &OptionValue) -> Result<(), UbgiError> {
+        match (key, value) {
+            ("engine.ply", OptionValue::Int(ply @ 1..=8)) => {
+                self.ply = *ply;
+                if let Some(session) = self.session.as_mut() {
+                    configure_ply(session, self.ply)?;
+                }
+                Ok(())
+            }
+            ("engine.ply", _) => Err(UbgiError::bad_value("engine.ply must_be 1..8")),
+            _ => Err(UbgiError::unsupported("key")),
+        }
+    }
+
     fn on_ready(&mut self) -> Result<(), UbgiError> {
-        let _ = ensure_session(
+        let session = ensure_session(
             &mut self.session,
             &self.gnubg_bin,
             self.gnubg_pkgdatadir.as_deref(),
         )?;
-        Ok(())
+        configure_ply(session, self.ply)
     }
 
     fn choose_move(&mut self, game: &Game, dice: Dice) -> Result<UbgiMove, UbgiError> {
@@ -188,8 +214,9 @@ impl UbgiEngine for GnubgCliAdapter {
         let x_to_move = game.position().turn();
         let child_x_to_move = !x_to_move;
 
-        let chosen_id = choose_best_legal_by_eval(session_ref, &encodable_ids, child_x_to_move)
-            .map_err(|err| format!("gnubg_eval_select_failed {err}"))?;
+        let chosen_id =
+            choose_best_legal_by_eval(session_ref, &encodable_ids, child_x_to_move, self.ply - 1)
+                .map_err(|err| format!("gnubg_eval_select_failed {err}"))?;
 
         let chosen_idx = legal_ids
             .iter()
@@ -203,6 +230,17 @@ impl UbgiEngine for GnubgCliAdapter {
             .ok_or_else(|| "move_encode selected_child_not_encodable".to_string())?;
         parse_ubgi_move(mv)
     }
+}
+
+fn configure_ply(session: &mut GnubgSession, ply: i64) -> Result<(), UbgiError> {
+    let native_ply = ply - 1;
+    session
+        .run_batch(&[
+            format!("set evaluation chequerplay plies {native_ply}"),
+            format!("set evaluation cubedecision plies {native_ply}"),
+        ])
+        .map(|_| ())
+        .map_err(|err| UbgiError::bad_state(format!("gnubg_config_failed {err}")))
 }
 
 fn ensure_session<'a>(
@@ -223,6 +261,7 @@ fn choose_best_legal_by_eval(
     session: &mut GnubgSession,
     legal_ids: &[String],
     child_x_to_move: bool,
+    native_ply: i64,
 ) -> Result<String, String> {
     if legal_ids.is_empty() {
         return Err("no_legal_ids".to_string());
@@ -251,7 +290,7 @@ fn choose_best_legal_by_eval(
             if seg_idx >= legal_ids.len() {
                 break;
             }
-            if let Some(eq) = parse_eval_equity(&segment) {
+            if let Some(eq) = parse_eval_equity(&segment, native_ply) {
                 trace_log(&format!(
                     "eval-choice idx={} id={} eq={:.6}",
                     seg_idx, legal_ids[seg_idx], eq
@@ -291,24 +330,15 @@ fn choose_best_legal_by_eval(
         })
 }
 
-fn parse_eval_equity(segment: &str) -> Option<f32> {
+fn parse_eval_equity(segment: &str, native_ply: i64) -> Option<f32> {
+    let prefix = if native_ply == 0 {
+        "static:".to_string()
+    } else {
+        format!("{native_ply} ply:")
+    };
     for line in segment.lines() {
         let t = line.trim_start();
-        if !t.starts_with("2 ply:") {
-            continue;
-        }
-        let values: Vec<f32> = t
-            .split_whitespace()
-            .filter_map(|token| token.parse::<f32>().ok())
-            .collect();
-        if values.len() >= 2 {
-            return Some(values[values.len() - 2]);
-        }
-    }
-
-    for line in segment.lines() {
-        let t = line.trim_start();
-        if !t.starts_with("1 ply:") && !t.starts_with("static:") {
+        if !t.starts_with(&prefix) {
             continue;
         }
         let values: Vec<f32> = t
@@ -380,5 +410,35 @@ fn trace_log(message: &str) {
     };
     if let Ok(mut file) = OpenOptions::new().create(true).append(true).open(path) {
         let _ = writeln!(file, "{message}");
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{GnubgCliAdapter, parse_eval_equity};
+    use bkgm::ubgi::{OptionValue, UbgiEngine};
+
+    #[test]
+    fn accepts_root_inclusive_ply_without_starting_gnubg() {
+        let mut adapter = GnubgCliAdapter {
+            gnubg_bin: "unused".to_string(),
+            gnubg_pkgdatadir: None,
+            ply: 3,
+            session: None,
+        };
+
+        adapter.set("engine.ply", &OptionValue::Int(1)).unwrap();
+
+        assert_eq!(adapter.get("engine.ply"), Some(OptionValue::Int(1)));
+        assert!(adapter.set("engine.ply", &OptionValue::Int(0)).is_err());
+    }
+
+    #[test]
+    fn selects_the_requested_native_evaluation_row() {
+        let output = "static: 0.1 0.2\n1 ply: 0.3 0.4\n2 ply: 0.5 0.6\n";
+        assert_eq!(parse_eval_equity(output, 0), Some(0.1));
+        assert_eq!(parse_eval_equity(output, 1), Some(0.3));
+        assert_eq!(parse_eval_equity(output, 2), Some(0.5));
+        assert_eq!(parse_eval_equity(output, 3), None);
     }
 }

@@ -41,7 +41,7 @@ pub fn finalize_resolved_engine(mut engine: ResolvedEngine) -> ResolvedEngine {
     {
         let unsupported: Vec<String> = engine
             .launch
-            .options()
+            .ubgi()
             .keys()
             .filter(|k| !supported.contains(*k))
             .cloned()
@@ -55,7 +55,7 @@ pub fn finalize_resolved_engine(mut engine: ResolvedEngine) -> ResolvedEngine {
         }
         engine
             .launch
-            .options_mut()
+            .ubgi_mut()
             .retain(|k, _| supported.contains(k));
     }
     canonicalize_resolved_engine_name(&mut engine);
@@ -142,7 +142,7 @@ impl EngineProcess {
             stdout: BufReader::new(stdout),
             options: config
                 .launch
-                .options()
+                .ubgi()
                 .iter()
                 .map(|(k, v)| (k.clone(), v.clone()))
                 .collect(),

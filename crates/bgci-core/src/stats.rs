@@ -4,7 +4,7 @@ use std::time::Duration;
 #[derive(Default)]
 pub(crate) struct DuelStats {
     a_points: f32,
-    pair_points: BTreeMap<usize, (f64, usize)>,
+    cluster_points: BTreeMap<usize, (f64, usize)>,
     incomplete: usize,
     total_plies: usize,
     a_decisions: usize,
@@ -47,9 +47,9 @@ impl DuelStats {
         };
 
         self.a_points += a_game_points;
-        let pair = self.pair_points.entry(update.game_idx / 2).or_default();
-        pair.0 += f64::from(a_game_points);
-        pair.1 += 1;
+        let cluster = self.cluster_points.entry(update.pair_index).or_default();
+        cluster.0 += f64::from(a_game_points);
+        cluster.1 += 1;
 
         if update.a_is_x {
             self.a_points_as_x += update.points_x;
@@ -103,19 +103,8 @@ impl DuelStats {
     ) -> [String; 6] {
         let elapsed_secs = elapsed.as_secs_f64();
         let games = games_done.max(1);
-        let complete_pair_ppg = self
-            .pair_points
-            .values()
-            .filter(|(_, legs)| *legs == 2)
-            .map(|(points, _)| points / 2.0)
-            .collect::<Vec<_>>();
-        let pair_sum = complete_pair_ppg.iter().sum::<f64>();
-        let pair_sq_sum = complete_pair_ppg.iter().map(|value| value * value).sum();
-        let (a_avg_pts, a_avg_ci95) = if complete_pair_ppg.is_empty() {
-            (self.a_points as f64 / games as f64, 0.0)
-        } else {
-            mean_ci95(pair_sum, pair_sq_sum, complete_pair_ppg.len())
-        };
+        let a_avg_pts = self.a_points as f64 / games as f64;
+        let a_avg_ci95 = 1.96 * cluster_robust_se(&self.cluster_points, a_avg_pts, games_done);
         let a_avg_ms = if self.a_decisions == 0 {
             0.0
         } else {
@@ -169,17 +158,16 @@ impl DuelStats {
     }
 }
 
-fn mean_ci95(sum: f64, sum_sq: f64, n: usize) -> (f64, f64) {
-    if n == 0 {
-        return (0.0, 0.0);
+fn cluster_robust_se(clusters: &BTreeMap<usize, (f64, usize)>, mean: f64, games: usize) -> f64 {
+    let count = clusters.len();
+    if count < 2 || games == 0 {
+        return 0.0;
     }
-    let mean = sum / n as f64;
-    if n < 2 {
-        return (mean, 0.0);
-    }
-    let variance = ((sum_sq - (sum * sum) / n as f64) / (n as f64 - 1.0)).max(0.0);
-    let se = (variance / n as f64).sqrt();
-    (mean, 1.96 * se)
+    let residual_sum = clusters
+        .values()
+        .map(|(score, size)| (score - mean * *size as f64).powi(2))
+        .sum::<f64>();
+    ((count as f64 / (count - 1) as f64) * residual_sum).sqrt() / games as f64
 }
 
 fn ratio_pct(count: usize, total: usize) -> f64 {
@@ -217,7 +205,7 @@ fn fmt_duration_short(d: Duration) -> String {
 }
 
 pub(crate) struct GameUpdate {
-    pub(crate) game_idx: usize,
+    pub(crate) pair_index: usize,
     pub(crate) a_is_x: bool,
     pub(crate) winner_x: Option<bool>,
     pub(crate) points_x: f32,
@@ -227,4 +215,22 @@ pub(crate) struct GameUpdate {
     pub(crate) b_decisions: usize,
     pub(crate) a_decision_time: Duration,
     pub(crate) b_decision_time: Duration,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::cluster_robust_se;
+    use std::collections::BTreeMap;
+
+    #[test]
+    fn robust_se_weights_variable_cluster_sizes_by_game() {
+        let clusters = BTreeMap::from([(0, (2.0, 2)), (1, (0.0, 1))]);
+        let mean = 2.0_f64 / 3.0;
+        let expected = (2.0_f64 * ((2.0 - 2.0 * mean).powi(2) + mean.powi(2))).sqrt() / 3.0;
+        assert!((cluster_robust_se(&clusters, mean, 3) - expected).abs() < 1e-12);
+        assert_eq!(
+            cluster_robust_se(&BTreeMap::from([(0, (1.0, 1))]), 1.0, 1),
+            0.0
+        );
+    }
 }

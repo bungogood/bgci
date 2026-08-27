@@ -20,40 +20,42 @@ work, game execution, and statistical analysis. Their distributed schedulers
 scale that model but do not define it. Cutechess and fastchess make a repeated,
 side-swapped game pair the basic unit of work.
 
-For backgammon, the equivalent unit is a mirror pair: two games use the same
-dice seed while the engines swap sides. Statistical analysis treats the pair,
-not each game, as the independent observation.
+For backgammon, games are grouped into mirror clusters: two games use the same
+dice seed while the engines swap sides. An odd final game forms a singleton
+cluster with a deterministically selected side. Statistical analysis treats
+clusters, not individual games, as independent observations.
 
 ## Model
 
 ### Benchmark
 
 An immutable resolved experiment manifest. Its kind is either `duel` or
-`league`. It records the variant, rules, base seed, requested mirror-pair count,
-engine builds, options, and software format versions.
+`league`. It records the variant, rules, base seed, requested game count,
+engine builds, UBGI settings, and software format versions.
 
 ### Engine Build
 
-A resolved executable configuration, not merely an alias. Identity includes the
-command, options, executable digest where available, and model/data artifact
-digests in a future extension. Changing any resolved input creates a different
-build identity.
+A resolved executable configuration, not merely a profile alias. Identity
+includes the command, environment, UBGI settings, executable digest where
+available, and model/data artifact digests in a future extension. Changing any
+resolved input creates a different build identity.
 
 ### Matchup
 
 A pairing of two engine builds within a benchmark. A saved duel has one matchup. A
 league has one or more scheduled matchups.
 
-### Pair And Game
+### Cluster And Game
 
-A pair has a stable index and deterministic seed. Its two game rows have swapped
-sides and are accepted atomically. Retries and failures must never overwrite a
-conflicting accepted result.
+A cluster has a stable `pair_index` and deterministic seed. Full clusters have
+two game rows with swapped sides; an odd final cluster has one explicitly
+scheduled leg. Retries and failures must never overwrite a conflicting result.
 
 ## Storage
 
 SQLite is the authoritative local application store. There is one current
-schema, identified by SQLite `user_version = 1`.
+schema, identified by SQLite `user_version = 2`. Older versions are rejected;
+there are no in-place migrations.
 
 Core tables:
 
@@ -73,9 +75,9 @@ records.
 
 ## Statistics
 
-The first release uses a fixed number of mirror pairs. It reports:
+The first release uses a fixed number of games, mirrored in two-game clusters when possible. It reports:
 
-- completed pairs
+- completed games
 - game wins and losses
 - normal, gammon, and backgammon distributions
 - points per game and paired point differential
@@ -92,9 +94,9 @@ assumptions.
 ## CLI Direction
 
 ```text
-bgci duel --engine-a A --engine-b B --pairs 10
-bgci duel --name change-123 --engine-a NEW --engine-b BASE --pairs 1000 --save
-bgci league --name engines-2026 --engines A B C --pairs-per-matchup 500
+bgci duel --engine-a A --engine-b B --games 20
+bgci duel --name change-123 --engine-a NEW --engine-b BASE --games 2000 --save
+bgci league --name engines-2026 --engines A B C --games-per-matchup 1000
 bgci rank create main --engines A B C
 bgci rank add main --engines D
 bgci rank list
@@ -114,9 +116,9 @@ Implemented:
 1. CSV and legacy global ratings persistence are removed.
 2. The matchup runner returns typed, mirrored game records.
 3. SQLite storage ingests results directly into one current schema.
-4. Saved duels and leagues share one pair-oriented executor and schema.
-5. Run manifests are atomic and completion requires every requested pair.
-6. Reported uncertainty is calculated from completed mirror-pair scores.
+4. Saved duels and leagues share one cluster-oriented executor and schema.
+5. Run manifests are atomic and completion requires every requested game.
+6. Reported uncertainty is cluster-robust and includes singleton clusters.
 7. Adaptive ranking pools support coverage-first scheduling, information-guided
    batches, continuous execution, and pause/resume from SQLite.
 8. Ranking queries aggregate normalized point scores and mirrored-pair
@@ -128,7 +130,7 @@ Implemented:
 Next:
 
 1. Add executable/model fingerprints when engine identities stabilize.
-2. Persist accepted pairs incrementally and support resume/verification.
+2. Persist accepted games incrementally and support resume/verification.
 3. Add bootstrap calibration and confirmation scheduling for transitivity
    diagnostics.
 4. Extend rankings with explicitly compatible cross-pool history when needed.

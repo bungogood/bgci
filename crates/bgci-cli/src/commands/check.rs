@@ -1,7 +1,7 @@
 use bgci_core::checker::run_check;
 use bgci_core::common::{Variant, parse_variant};
 use bgci_core::config::{
-    MatchupConfig, ResolvedEngine, load_toml, resolve_engine_input, resolve_engine_reference,
+    MatchupConfig, ResolvedEngine, load_toml, resolve_engine_input, resolve_engine_spec,
 };
 use clap::Args;
 
@@ -14,9 +14,6 @@ pub struct CheckArgs {
 
     #[arg(long)]
     variant: Option<String>,
-
-    #[arg(long = "ply")]
-    ply: Option<usize>,
 }
 
 pub fn run(args: CheckArgs) -> Result<(), String> {
@@ -30,7 +27,7 @@ pub fn run(args: CheckArgs) -> Result<(), String> {
             Some(engine) if engine.eq_ignore_ascii_case("b") => {
                 vec![(resolve_engine_input(cfg.engine_b)?, variant)]
             }
-            Some(engine) => vec![(resolve_engine_reference(engine)?, variant)],
+            Some(engine) => vec![(resolve_engine_spec(engine)?, variant)],
             None => vec![
                 (resolve_engine_input(cfg.engine_a)?, variant),
                 (resolve_engine_input(cfg.engine_b)?, variant),
@@ -41,7 +38,7 @@ pub fn run(args: CheckArgs) -> Result<(), String> {
             if idx > 0 {
                 println!();
             }
-            run_single(engine_cfg, default_variant, args.variant.clone(), args.ply)?;
+            run_single(engine_cfg, default_variant, args.variant.clone())?;
         }
 
         return Ok(());
@@ -50,31 +47,15 @@ pub fn run(args: CheckArgs) -> Result<(), String> {
     let engine = args.engine.as_deref().ok_or_else(|| {
         "missing engine. usage: bgci check <engine> or bgci check --config <path> [a|b]".to_string()
     })?;
-    let engine_cfg = resolve_engine_reference(engine)?;
-    run_single(
-        engine_cfg,
-        parse_variant("backgammon")?,
-        args.variant,
-        args.ply,
-    )
+    let engine_cfg = resolve_engine_spec(engine)?;
+    run_single(engine_cfg, parse_variant("backgammon")?, args.variant)
 }
 
 fn run_single(
-    mut engine_cfg: ResolvedEngine,
+    engine_cfg: ResolvedEngine,
     default_variant: Variant,
     variant_override: Option<String>,
-    ply_override: Option<usize>,
 ) -> Result<(), String> {
-    if let Some(ply) = ply_override {
-        if ply < 1 {
-            return Err("--ply must be >= 1".to_string());
-        }
-        engine_cfg
-            .launch
-            .options_mut()
-            .insert("engine.ply".to_string(), ply.to_string());
-    }
-
     let variant = match variant_override {
         Some(variant) => parse_variant(&variant)?,
         None => default_variant,

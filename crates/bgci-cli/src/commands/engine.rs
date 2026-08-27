@@ -1,4 +1,4 @@
-use bgci_core::config::{list_engine_alias_details, resolve_engine_reference};
+use bgci_core::config::{list_profile_details, resolve_profile_reference};
 use bgci_core::engines;
 use clap::Args;
 use std::process::{Command, Stdio};
@@ -26,7 +26,7 @@ pub fn run(args: EngineArgs) -> Result<(), String> {
             return Err("extra engine args are not allowed with --list".to_string());
         }
         if args.verbose {
-            for detail in list_engine_alias_details()? {
+            for detail in list_profile_details()? {
                 println!("{}", detail.name);
                 if let Some(family) = &detail.family {
                     println!("  family: {family}");
@@ -34,9 +34,9 @@ pub fn run(args: EngineArgs) -> Result<(), String> {
                 if let Some(version) = &detail.version {
                     println!("  version: {version}");
                 }
-                if !detail.configuration.is_empty() {
-                    println!("  configuration:");
-                    for (key, value) in &detail.configuration {
+                if !detail.labels.is_empty() {
+                    println!("  labels:");
+                    for (key, value) in &detail.labels {
                         println!("    {key}={value}");
                     }
                 }
@@ -51,17 +51,17 @@ pub fn run(args: EngineArgs) -> Result<(), String> {
                         println!("    {}={}", key, value);
                     }
                 }
-                if !detail.options.is_empty() {
-                    println!("  options:");
-                    for (key, value) in detail.options {
+                if !detail.ubgi.is_empty() {
+                    println!("  ubgi:");
+                    for (key, value) in detail.ubgi {
                         println!("    {key}={value}");
                     }
                 }
             }
             return Ok(());
         }
-        println!("family               engine");
-        for detail in list_engine_alias_details()? {
+        println!("family               profile");
+        for detail in list_profile_details()? {
             println!(
                 "{:<20} {}",
                 detail.family.as_deref().unwrap_or("-"),
@@ -83,7 +83,7 @@ pub fn run(args: EngineArgs) -> Result<(), String> {
         return engines::run_by_name_with_args(builtin, &args.engine_args);
     }
 
-    let engine = resolve_engine_reference(&kind)?;
+    let engine = resolve_profile_reference(&kind)?;
     run_external_engine(
         engine.launch.command(),
         engine.launch.env(),

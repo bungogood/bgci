@@ -8,6 +8,7 @@ use tracing::debug;
 
 use crate::config::ResolvedMatchup;
 use crate::duel_game::DuelGameResult;
+pub use crate::duel_game::{Participant, TurnRecord};
 use crate::duel_workers::{LocalWorkerSpec, WorkerMessage, spawn_local_workers};
 use crate::stats::{DuelStats, GameUpdate};
 
@@ -18,12 +19,15 @@ pub struct RunSummary {
 #[derive(Clone, Debug)]
 pub struct GameRecord {
     pub game_idx: usize,
+    pub pair_index: usize,
+    pub leg: usize,
     pub points_a: f64,
     pub plies: usize,
     pub a_decisions: usize,
     pub b_decisions: usize,
     pub a_decision_time: Duration,
     pub b_decision_time: Duration,
+    pub transcript: Option<Vec<TurnRecord>>,
 }
 
 pub struct MatchupRun {
@@ -32,13 +36,24 @@ pub struct MatchupRun {
 }
 
 pub async fn run_matchup(cfg: &ResolvedMatchup) -> Result<MatchupRun, String> {
-    let game_count = validate_execution(cfg.pairs, cfg.parallel, cfg.max_plies)?;
+    run_matchup_inner(cfg, false).await
+}
+
+pub async fn run_matchup_with_transcripts(cfg: &ResolvedMatchup) -> Result<MatchupRun, String> {
+    run_matchup_inner(cfg, true).await
+}
+
+async fn run_matchup_inner(
+    cfg: &ResolvedMatchup,
+    record_transcripts: bool,
+) -> Result<MatchupRun, String> {
+    let game_count = validate_execution(cfg.games, cfg.parallel, cfg.max_plies)?;
 
     let ui = ProgressUi::new(game_count)?;
 
     let mut stats = DuelStats::new();
     let mut games = Vec::with_capacity(game_count);
-    let workers = cfg.parallel.min(cfg.pairs);
+    let workers = cfg.parallel.min(cfg.games.div_ceil(2));
 
     let run_start = Instant::now();
 
@@ -48,13 +63,14 @@ pub async fn run_matchup(cfg: &ResolvedMatchup) -> Result<MatchupRun, String> {
     let handles = spawn_local_workers(
         LocalWorkerSpec {
             workers,
-            pairs: cfg.pairs,
+            games: cfg.games,
             variant: cfg.variant,
             max_plies: cfg.max_plies,
             base_seed: cfg.seed,
             engine_a: cfg.engine_a.clone(),
             engine_b: cfg.engine_b.clone(),
             cancel: cancel.clone(),
+            record_transcripts,
         },
         tx.clone(),
     );
@@ -71,11 +87,22 @@ pub async fn run_matchup(cfg: &ResolvedMatchup) -> Result<MatchupRun, String> {
                     cancel.store(true, Ordering::Relaxed);
                 }
             }
-            WorkerMessage::Game { game_idx, result } => {
+            WorkerMessage::Game {
+                game_idx,
+                pair_index,
+                leg,
+                result,
+            } => {
                 done_games += 1;
                 if run_error.is_none() {
                     games.push(process_completed_game(
-                        game_idx, &result, cfg, &mut stats, run_start, &ui, done_games,
+                        (game_idx, pair_index, leg),
+                        &result,
+                        cfg,
+                        &mut stats,
+                        run_start,
+                        &ui,
+                        done_games,
                     ));
                 }
             }
@@ -123,9 +150,9 @@ pub async fn run_matchup(cfg: &ResolvedMatchup) -> Result<MatchupRun, String> {
     })
 }
 
-fn validate_execution(pairs: usize, parallel: usize, max_plies: usize) -> Result<usize, String> {
-    if pairs == 0 {
-        return Err("pairs must be greater than zero".to_string());
+fn validate_execution(games: usize, parallel: usize, max_plies: usize) -> Result<usize, String> {
+    if games == 0 {
+        return Err("games must be greater than zero".to_string());
     }
     if parallel == 0 {
         return Err("parallel must be greater than zero".to_string());
@@ -133,9 +160,7 @@ fn validate_execution(pairs: usize, parallel: usize, max_plies: usize) -> Result
     if max_plies == 0 {
         return Err("max plies must be greater than zero".to_string());
     }
-    pairs
-        .checked_mul(2)
-        .ok_or_else(|| "pair count is too large".to_string())
+    Ok(games)
 }
 
 struct ProgressUi {
@@ -182,7 +207,7 @@ impl ProgressUi {
 }
 
 fn process_completed_game(
-    game_idx: usize,
+    schedule: (usize, usize, usize),
     result: &DuelGameResult,
     cfg: &ResolvedMatchup,
     stats: &mut DuelStats,
@@ -190,7 +215,8 @@ fn process_completed_game(
     ui: &ProgressUi,
     done_games: usize,
 ) -> GameRecord {
-    let a_is_x = game_idx % 2 == 0;
+    let (game_idx, pair_index, leg) = schedule;
+    let a_is_x = leg == 0;
 
     debug!(
         game = game_idx + 1,
@@ -202,7 +228,7 @@ fn process_completed_game(
     );
 
     let a_game_points = stats.record_game(&GameUpdate {
-        game_idx,
+        pair_index,
         a_is_x,
         winner_x: result.winner_x,
         points_x: result.points_x,
@@ -220,11 +246,14 @@ fn process_completed_game(
 
     GameRecord {
         game_idx,
+        pair_index,
+        leg,
         points_a: f64::from(a_game_points),
         plies: result.plies,
         a_decisions: result.a_decisions,
         b_decisions: result.b_decisions,
         a_decision_time: result.a_decision_time,
         b_decision_time: result.b_decision_time,
+        transcript: result.transcript.clone(),
     }
 }

@@ -17,15 +17,15 @@ pub struct LeagueArgs {
     #[arg(long, num_args = 2..)]
     engines: Vec<String>,
 
-    /// Mirrored pairs to run for every engine matchup.
-    #[arg(long, default_value_t = 100)]
-    pairs_per_matchup: usize,
+    /// Games to run for every engine matchup.
+    #[arg(long, default_value_t = 200)]
+    games_per_matchup: usize,
 
-    /// Number of pair workers to run concurrently.
+    /// Number of mirrored game groups to run concurrently.
     #[arg(long, default_value_t = 1)]
     parallel: usize,
 
-    /// Base seed used to derive deterministic matchup and pair seeds.
+    /// Base seed used to derive deterministic matchup and game-group seeds.
     #[arg(long, default_value_t = 42)]
     seed: u64,
 
@@ -43,7 +43,7 @@ pub struct LeagueArgs {
 }
 
 pub async fn run(args: LeagueArgs) -> Result<(), String> {
-    validate_pairs(args.pairs_per_matchup)?;
+    validate_games(args.games_per_matchup)?;
     let variant = parse_variant(&args.variant)?;
     let engines = resolve_and_finalize_engines(&args.engines)?;
 
@@ -55,7 +55,7 @@ pub async fn run(args: LeagueArgs) -> Result<(), String> {
             variant: variant_name(variant),
             seed: args.seed,
             max_plies: args.max_plies,
-            pairs: args.pairs_per_matchup,
+            games: args.games_per_matchup,
         },
         &engines,
     )?;
@@ -68,7 +68,7 @@ pub async fn run(args: LeagueArgs) -> Result<(), String> {
             engines[scheduled.engine_a].name, engines[scheduled.engine_b].name
         );
         let cfg = ResolvedMatchup {
-            pairs: args.pairs_per_matchup,
+            games: args.games_per_matchup,
             parallel: args.parallel,
             seed: scheduled.handle.seed(),
             max_plies: args.max_plies,
@@ -101,11 +101,9 @@ fn mark_failed(store: &Database, benchmark_id: i64, error: String) -> String {
     }
 }
 
-fn validate_pairs(pairs: usize) -> Result<(), String> {
-    if pairs == 0 {
-        Err("--pairs-per-matchup must be greater than zero".to_string())
-    } else if pairs.checked_mul(2).is_none() {
-        Err("pair count is too large".to_string())
+fn validate_games(games: usize) -> Result<(), String> {
+    if games == 0 {
+        Err("--games-per-matchup must be greater than zero".to_string())
     } else {
         Ok(())
     }
